@@ -15,6 +15,7 @@ python -m strategy_lab.plots                           # results/*.png
 python -m strategy_lab.scan [--no-refresh]             # today's signals -> results/scan_<date>_*.csv
 python -m strategy_lab.portfolio_study                 # step 1: real capital-constrained portfolio (K slots, whole shares)
 python -m strategy_lab.portfolio_plots                 # step 1 charts + by-slots table
+python -m strategy_lab.buyback_data / buyback_study / buyback_plots   # buyback event study (docs/buyback-strategy-study.md)
 ```
 
 | File | Purpose |
