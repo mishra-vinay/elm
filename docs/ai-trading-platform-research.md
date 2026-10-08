@@ -579,13 +579,17 @@ Largest risk to schedule is not coding but **paper/live soak time** and data wor
 
 ---
 
-## 14. Decisions Needed From You
-1. **Capital and risk tolerance** (starting capital, max acceptable drawdown) — drives lot sizing and which strategies are even feasible.
-2. **Personal/family use only?** (If not, regulatory scope changes materially.)
-3. **Primary broker**: accept Dhan-primary/Zerodha-secondary, or prefer track-record-first (flip)?
-4. **Instruments first**: cash equities + index futures/options via underlying signals (recommended) vs. options-structures-first.
-5. **Team and timeline**: solo vs. 2 engineers (affects the roadmap in §12).
-6. **Data budget**: broker data only vs. adding a licensed tick/historical vendor in Phase 1.
+## 14. Assumptions Used in This Report
+The recommendations above rest on these defaults. If any differs in practice, the affected section is noted so it can be adjusted.
+
+| Topic | Assumption | Where it matters |
+|---|---|---|
+| Account size / risk | Worked examples use a ₹10 lakh account; all limits are percentages of equity, so they scale. Below ~₹5–10 lakh **[E]**, lot sizes force over-risking on index options and the system skips such trades | §3 sizing, §7 limits |
+| Usage | Personal/family accounts only. Managing others' money or selling signals/algos is a different regulatory regime and is out of scope | §2.3 |
+| Broker | Dhan primary, Zerodha Kite Connect secondary; the adapter layer makes flipping them a config change | §6 |
+| Instruments, in order | Cash equities and index futures/options traded via underlying signals first; defined-risk option structures in Phase 3 | §3, §12 |
+| Team | Effort is given for both a solo developer and two engineers | §12.3 |
+| Data | Broker data APIs only in Phase 1; a licensed tick/historical vendor is optional and priced separately | §4, §12.2 |
 
 ---
 
