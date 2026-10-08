@@ -29,11 +29,11 @@ MIN_TURNOVER_CR = 20.0      # liquidity filter: 20-day average traded value, Rs 
 
 def exit_ref(name: str, df: pd.DataFrame):
     if name.startswith("ema_cross"):
-        slow = int(name.split("_")[3])
-        return float(ema(df.close, slow).iloc[-1]), f"EMA{slow}"
+        fast, slow = int(name.split("_")[2]), int(name.split("_")[3])
+        return float(ema(df.close, slow).iloc[-1]), f"EMA{slow} level (exit when EMA{fast} closes below EMA{slow})"
     if name.startswith("donchian"):
         n_out = int(name.split("_")[2])
-        return float(df.low.rolling(n_out).min().shift(1).iloc[-1]), f"{n_out}d low"
+        return float(df.low.rolling(n_out).min().shift(1).iloc[-1]), f"{n_out}-day low (exit on close below it)"
     return np.nan, ""
 
 
