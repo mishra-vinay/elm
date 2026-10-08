@@ -65,7 +65,7 @@ def trading_pos(index: pd.DatetimeIndex, ts: pd.Timestamp, before_open_cutoff="0
 
 
 def build_trades() -> pd.DataFrame:
-    ev = pd.read_csv(CACHE / "buyback_events.csv", parse_dates=["rec_date", "ex_date", "first_ts", "approval_ts"])
+    ev = pd.read_csv(CACHE / "buyback_events.csv", parse_dates=["rec_date", "ex_date", "approval_ts"])
     px = load_prices(sorted(ev.symbol.unique()))
     nifty = data.load("^NSEI")
     rows = []
@@ -84,8 +84,17 @@ def build_trades() -> pd.DataFrame:
         i_cum = max(i0, min(ie, ir) - 1)                # last cum day (day before ex-date)
         entry = d.open.iloc[i0]
         raw_entry = d.open.iloc[i0] * d.raw_close.iloc[i0] / d.close.iloc[i0]
-        pre_close_raw = d.raw_close.iloc[max(i0 - 1, 0)]
-        ann_react = d.close.iloc[min(i0, len(d) - 1)] / d.close.iloc[max(i0 - 1, 0)] - 1
+        ann_day = idx.searchsorted(e.approval_ts.normalize())
+        pre_pos = max(ann_day - 1, 0)                       # last close BEFORE the announcement day
+        pre_close_raw = d.raw_close.iloc[pre_pos]
+        ann_react = d.open.iloc[i0] / d.close.iloc[pre_pos] - 1   # move already in the price at our entry open
+        offer = np.nan
+        cands = [float(x) for x in str(e.price_candidates).split(";") if x not in ("", "nan")]
+        ok_c = [c for c in cands if 0.9 <= c / pre_close_raw <= 4.0]
+        if ok_c:
+            from collections import Counter
+            offer = Counter(ok_c).most_common(1)[0][0]
+        e = e.copy(); e["offer_price"] = offer
         # exit variants (adjusted prices -> total return)
         rec_close = d.close.iloc[ir]; cum_close = d.close.iloc[i_cum]
         ratio = d.raw_close.iloc[ir] / d.close.iloc[ir]
@@ -123,7 +132,8 @@ def stats(x: pd.Series, name: str, cost=COST_RT) -> dict:
     n = x.dropna(); net = n - cost
     rng = np.random.default_rng(3)
     bs = np.array([rng.choice(net.values, len(net)).mean() for _ in range(2000)])
-    return dict(variant=name, n=len(net), mean_gross=n.mean(), mean_net=net.mean(), median_net=net.median(),
+    k = max(1, int(0.025 * len(net))); trim = np.sort(net.values)[k:-k].mean() if len(net) > 2 * k + 2 else np.nan
+    return dict(variant=name, n=len(net), mean_gross=n.mean(), mean_net=net.mean(), trimmed_mean_net=trim, median_net=net.median(),
                 win_rate=(net > 0).mean(), ci_lo=np.percentile(bs, 2.5), ci_hi=np.percentile(bs, 97.5),
                 worst=net.min(), best=net.max(), sharpe_per_trade=net.mean() / net.std() if net.std() > 0 else np.nan)
 
@@ -182,7 +192,7 @@ def main():
     p = (1 + (sims >= actual).sum()) / (1 + len(sims))
     pd.set_option("display.width", 220); pd.set_option("display.max_colwidth", 70)
     show = res.copy()
-    for c in ("mean_gross", "mean_net", "median_net", "ci_lo", "ci_hi", "worst", "best"):
+    for c in ("mean_gross", "mean_net", "trimmed_mean_net", "median_net", "ci_lo", "ci_hi", "worst", "best"):
         show[c] = (show[c] * 100).round(2)
     show["win_rate"] = (show.win_rate * 100).round(0); show["sharpe_per_trade"] = show.sharpe_per_trade.round(2)
     print(show.to_string(index=False))

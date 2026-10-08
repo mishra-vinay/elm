@@ -95,6 +95,13 @@ PRICE = re.compile(r"(?:price\s+of|at\s+(?:a\s+)?(?:maximum\s+)?price\s+(?:of\s+
 PRICE2 = re.compile(r"(?:Rs\.?|INR|₹)\s*(\d[\d,]*(?:\.\d+)?)\s*(?:/-)?\s*\(?[^.\n]{0,60}?per\s+(?:fully\s+paid[\s\-]up\s+)?(?:equity\s+)?share", re.I)
 
 
+def price_candidates(txt: str) -> list[float]:
+    vals = []
+    for rx in (PRICE, PRICE2):
+        vals += [float(m.replace(",", "")) for m in rx.findall(txt)]
+    return [v for v in vals if v >= 2]
+
+
 def parse_price(txt: str):
     for rx in (PRICE, PRICE2):
         vals = [float(m.replace(",", "")) for m in rx.findall(txt)]
@@ -110,37 +117,38 @@ CANDIDATE_DESC = {"Outcome of Board Meeting", "Buyback", "Public Announcement - 
                   "Newspaper Publication", "Copy of Newspaper Publication", "Disclosure", "Shareholders meeting", "Announcement under Regulation 30 (LODR)-Updates"}
 
 
-def find_events(s, anns, max_pdfs=14):
-    """Return dict(first_mention_ts/desc, approval_ts/desc, price) by reading announcement PDFs in time order."""
+def find_events(s, anns, rec_date, max_pdfs=14, window_days=150):
+    """Board-approval filing = first filing, within `window_days` before the record date, whose text mentions a buyback
+    AND 'approv...' (board outcome / public announcement). Offer-price candidates are collected from that and later filings."""
     cand = []
     for a in anns:
         ts = pd.to_datetime(a["an_dt"], format="%d-%b-%Y %H:%M:%S", errors="coerce")
-        if pd.isna(ts):
+        if pd.isna(ts) or ts < rec_date - pd.Timedelta(days=window_days) or ts >= rec_date:
             continue
         if a["desc"] in CANDIDATE_DESC or BB.search(f"{a['desc']} {a['attchmntText']}"):
             cand.append((ts, a))
     cand.sort(key=lambda x: x[0])
-    first = approval = None; price = None; n = 0
+    approval = None; prices = []; n = 0
     for ts, a in cand:
         if n >= max_pdfs:
             break
-        meta_hit = bool(BB.search(f"{a['desc']} {a['attchmntText']}"))
-        txt = pdf_text(s, a["attchmntFile"]) if (a["attchmntFile"] and str(a["attchmntFile"]).lower().endswith(".pdf")) else ""
+        pdf = a["attchmntFile"] if a["attchmntFile"] and str(a["attchmntFile"]).lower().endswith(".pdf") else None
+        txt = pdf_text(s, pdf) if pdf else ""
         n += 1
+        meta_hit = bool(BB.search(f"{a['desc']} {a['attchmntText']}"))
         if not (meta_hit or BB.search(txt)):
             continue
-        if first is None:
-            first = (ts, a["desc"])
-        is_intim = a["desc"] == "Board Meeting Intimation"
-        if approval is None and not is_intim and (re.search(r"approv", txt, re.I) or a["desc"] in ("Buyback", "Public Announcement - Buyback of Shares")):
+        if a["desc"] == "Board Meeting Intimation":
+            continue
+        is_appr = bool(BB.search(txt) and re.search(r"approv", txt, re.I)) or a["desc"] in ("Buyback", "Public Announcement - Buyback of Shares")
+        if approval is None and is_appr:
             approval = (ts, a["desc"])
-        if price is None:
-            price = parse_price(txt)
-        if approval is not None and price is not None:
-            break
-    return dict(first_ts=first[0] if first else pd.NaT, first_desc=first[1] if first else None,
-                approval_ts=approval[0] if approval else pd.NaT, approval_desc=approval[1] if approval else None, offer_price=price,
-                n_candidates=len(cand))
+        if approval is not None:
+            prices += price_candidates(txt)
+            if prices and n >= 3:
+                break
+    return dict(approval_ts=approval[0] if approval else pd.NaT, approval_desc=approval[1] if approval else None,
+                price_candidates=";".join(str(p) for p in prices), n_candidates=len(cand))
 
 
 def main():
@@ -150,13 +158,13 @@ def main():
     rows = []
     for i, r in ev.iterrows():
         anns = announcements(s, r.symbol, r.rec_date)
-        info = find_events(s, anns)
+        info = find_events(s, anns, r.rec_date)
         rows.append({**r.to_dict(), **info})
         if i % 20 == 0:
-            print(f"  {i}/{len(ev)} {r.symbol} {info['approval_ts']} price={info['offer_price']}")
+            print(f"  {i}/{len(ev)} {r.symbol} {info['approval_ts']} cands={info['price_candidates'][:40]}", flush=True)
     out = pd.DataFrame(rows)
     out.to_csv(CACHE / "buyback_events.csv", index=False)
-    print(out[["first_ts", "approval_ts", "offer_price"]].notna().mean())
+    print("announcement found:", out.approval_ts.notna().mean(), "| price candidates:", (out.price_candidates.str.len() > 0).mean())
     return out
 
 
