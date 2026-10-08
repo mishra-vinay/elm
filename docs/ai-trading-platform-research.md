@@ -87,7 +87,7 @@ Five layers — pre-trade checks → per-trade stops → portfolio limits → sy
 ### 1.10 Key risks and limitations
 1. **The base rate is brutal:** SEBI found ~91 % of individual equity-derivatives traders lost money in FY25 — net losses ≈ ₹1.06 lakh crore **[V]**. Automation removes emotion; it does not create edge.
 2. **Costs:** STT on futures rose to 0.05 % and on option sales to 0.15 % of premium from 1 Apr 2026 **[V]**; flat per-order brokerage multiplies on multi-leg structures.
-3. **Regulation moves:** static-IP whitelisting, order tagging, daily forced logout, 10 OPS threshold since 1 Apr 2026 **[V]**. Running this for anyone *other than yourself/family* triggers algo-provider empanelment and possibly RA/RIA obligations **[V]** — get legal advice before offering it to others.
+3. **Regulation moves:** static-IP whitelisting, order tagging, daily forced logout, 10 OPS threshold since 1 Apr 2026 **[V]**. This system is for the owner's own account only (not for sale, no other people's accounts), which keeps it in the simplest category: self-built algo, no vendor empanelment, no multi-user design **[V]**.
 4. **Overfitting / model risk**, **operational risk** (API outages, auth expiry, rate limits), **tail events** (gaps, circuits, expiry-day volatility).
 
 ---
@@ -117,7 +117,7 @@ Add slippage (0.5–1 ₹/side on market-ish exits ≈ ₹30–65/side) and fric
 | Requirement | Detail |
 |---|---|
 | Effective | Full framework in force from **1 Apr 2026** (after extensions from Aug/Oct 2025) |
-| Static IP | Mandatory for API users; registered with the broker; changeable ~once/week; optional secondary IP; sharing only with family. Cloud/VPS IPs are acceptable, home dynamic IPs are not |
+| Static IP | Mandatory for API users; registered with the broker; changeable ~once/week; optional secondary IP. Cloud/VPS IPs are acceptable, home dynamic IPs are not |
 | Threshold | ≤ **10 orders/sec/exchange**: no individual strategy registration, but orders are tagged as algo (generic Algo ID). > 10 OPS: register via broker. Vendors/platforms face stricter registration/empanelment |
 | Sessions | OAuth + 2FA; all API sessions forcibly logged out daily → **daily re-authentication must be designed in** |
 | Orders | Market orders need **market protection** (non-zero) |
@@ -127,7 +127,7 @@ Add slippage (0.5–1 ₹/side on market-ish exits ≈ ₹30–65/side) and fric
 
 **Design response:** cap internal order rate at ~5 OPS (well under 10), tag/log every order with a unique client tag, retain all logs ≥ 5 yrs, add a pre-market auth checklist (alert if not authenticated by 08:45 IST), and use a registered static IP (AWS Elastic IP).
 
-**Personal use vs. offering to others:** the above assumes *you trade your own/family accounts*. Managing others' money or selling signals/algos is a different regulatory regime (algo-provider empanelment, Research Analyst/Investment Adviser rules). Out of scope — seek counsel.
+**Scope:** single owner, single account. That means one broker login per broker, one registered static IP (plus an optional secondary), no client-to-key mapping and no multi-tenant access control to build. Selling or sharing the software, or trading anyone else's account, would fall under a different regulatory regime (algo-provider empanelment, Research Analyst/Investment Adviser rules) and is out of scope.
 
 ### 2.4 Market-structure facts that affect strategy design **[V]**
 - One weekly index-options expiry per exchange: **Nifty weekly on NSE (Tuesday expiry since Sept 2025)**; BankNifty/FinNifty/Midcap Select are monthly-only; Sensex on BSE (expiry day reported inconsistently — Thursday per most sources **[?]**).
@@ -567,7 +567,7 @@ Largest risk to schedule is not coding but **paper/live soak time** and data wor
 | **Overfitting / backtest bias** | Easiest way to lose money with AI | Purged CV, DSR/PBO, trial logging, shadow mode |
 | **Costs & taxes** | STT hike, per-order brokerage, slippage, wide option spreads | Cost-aware EV filter; prefer low-turnover strategies; CA input |
 | **Regulatory change** | Static IP, algo tags, OPS limit, daily logout; further SEBI/NSE changes | Track circulars; compliance module; stay ≤ 5 OPS; logs retained 5 yrs |
-| **Scope creep into advice/ management of others' money** | Triggers algo-provider/RA/IA regimes | Keep personal/family; legal advice before expanding |
+| **Scope creep beyond own-account use** | Selling the software or trading others' accounts triggers algo-provider/RA/IA regimes | Keep it single-owner, own account only |
 | **Short-vol tail risk** | Gaps, circuits, event days wipe out months of premium | Wings, event calendar, size caps, expiry-day rules |
 | **Operational** | API outages, auth expiry, rate limits, VM failure, WebSocket gaps | Reconciliation, broker-resident stops, watchdog, secondary broker, runbooks |
 | **Data risk** | Bad ticks, missing OI, vendor Greeks errors, scraping breakage | Dual sources, own IV calc, sanity checks |
@@ -585,7 +585,7 @@ The recommendations above rest on these defaults. If any differs in practice, th
 | Topic | Assumption | Where it matters |
 |---|---|---|
 | Account size / risk | Worked examples use a ₹10 lakh account; all limits are percentages of equity, so they scale. Below ~₹5–10 lakh **[E]**, lot sizes force over-risking on index options and the system skips such trades | §3 sizing, §7 limits |
-| Usage | Personal/family accounts only. Managing others' money or selling signals/algos is a different regulatory regime and is out of scope | §2.3 |
+| Usage | Owner's own account only: not for sale, no family or third-party accounts. Single-tenant design | §2.3 |
 | Broker | Dhan primary, Zerodha Kite Connect secondary; the adapter layer makes flipping them a config change | §6 |
 | Instruments, in order | Cash equities and index futures/options traded via underlying signals first; defined-risk option structures in Phase 3 | §3, §12 |
 | Team | Effort is given for both a solo developer and two engineers | §12.3 |
