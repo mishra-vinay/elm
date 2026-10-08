@@ -4,7 +4,7 @@ A small research toolkit (no UI, no notifications): download adjusted NSE daily 
 equity strategies with realistic next-open execution and Indian delivery costs, validate them, and scan today's
 market for stocks currently matching each strategy.
 
-Findings and recommended process: [`docs/equity-strategy-research.md`](../docs/equity-strategy-research.md).
+Findings and recommended process: [`docs/equity-strategy-research.md`](../docs/equity-strategy-research.md); step 1 (realistic portfolio): [`docs/equity-step1-realistic-portfolio.md`](../docs/equity-step1-realistic-portfolio.md).
 
 ```
 pip install -r strategy_lab/requirements.txt
@@ -13,6 +13,8 @@ python -m strategy_lab.research                        # full study, writes resu
 python -m strategy_lab.index_check                     # Sensex 1997-2026 survivorship-free check
 python -m strategy_lab.plots                           # results/*.png
 python -m strategy_lab.scan [--no-refresh]             # today's signals -> results/scan_<date>_*.csv
+python -m strategy_lab.portfolio_study                 # step 1: real capital-constrained portfolio (K slots, whole shares)
+python -m strategy_lab.portfolio_plots                 # step 1 charts + by-slots table
 ```
 
 | File | Purpose |
@@ -23,6 +25,8 @@ python -m strategy_lab.scan [--no-refresh]             # today's signals -> resu
 | `strategies.py` | Per-stock 0/1 position-state functions, one registry entry per variant |
 | `engine.py` | Sleeve and monthly-rebalanced portfolio engines, costs, metrics, random-timing null test |
 | `research.py` | The full pipeline and the pre-registered screen |
+| `portfolio.py` | Capital-constrained simulator: K positions, whole shares, flat DP charge, ranking or random pick |
+| `portfolio_study.py` | Step-1 grid with pre-registered criteria and random-pick baseline |
 | `scan.py` | Live scanner: new entries / holds / exits on the last completed bar, plus factor rankings |
 | `tests/` | Alignment, cost-arithmetic and causality tests |
 
