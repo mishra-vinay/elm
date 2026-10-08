@@ -16,6 +16,8 @@
 6. **Multiple-testing warning.** 19 variants were tested. At a 10% threshold roughly 2 would pass by luck alone; 5 passed (three of them near-duplicate EMA variants). After a Bonferroni correction only EMA 10/30 clears the bar, and it is also the most trade-hungry of the winners.
 7. **Recommended proof-of-concept to automate first: the EMA 20/50 + ADX>20 daily trend filter** — as a *risk-controlled way to hold large-cap equities*, not as a source of alpha. Keep the low-volatility book as a second candidate. Everything else here is research, not production.
 
+![The recommended strategy at a glance: the EMA 20/50 + ADX rule on KOTAKBANK, and its scorecard against buy-and-hold](../strategy_lab/results/strategy_ema_20_50_adx.png)
+
 ---
 
 ## 2. What was done
