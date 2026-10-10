@@ -138,3 +138,15 @@ python -m strategy_lab.silver_run      # ~2 minutes; writes strategy_lab/results
 python -m strategy_lab.silver_plots
 ```
 Code: `strategy_lab/silver_data.py`, `silver_study.py`, `silver_run.py`, `silver_plots.py`. Results: `strategy_lab/results/silver_*.csv`.
+
+## 9. Addendum — Silver Micro (1 kg), one year
+
+MCX lists options only on Silver (30 kg) and Silver Mini (5 kg); I found no source for options on Silver Micro, which is a futures contract (1 kg lot, ₹1 per ₹1/kg move). So the question becomes: what does the same rule do traded as a **1 kg futures** position? The price series is the same, so the signals and trade counts are identical to §4; only the P&L units change. Costs assumed: ₹40 flat + 0.08% of notional per round trip (`strategy_lab/silver_mic.py`, results in `silver_mic_*.csv`).
+
+| Window | Sessions | Trades | Win rate | Net P&L per lot | 95% interval per trade | Gross | Costs | Max drawdown |
+|---|---|---|---|---|---|---|---|---|
+| Last 6 months | 127 | 62 | 39% | −₹1,500 | −₹734 to +₹755 | +₹13,200 | ₹14,800 | −₹18,900 |
+| **Last 1 year** | 248 | 117 | 44% | **+₹10,100** (₹87/trade) | −₹497 to +₹684 | +₹38,200 | ₹28,000 | −₹22,500 |
+| Prior year (Oct 24–Oct 25) | 250 | 85 | 53% | +₹200 | −₹231 to +₹254 | +₹11,400 | ₹11,200 | −₹11,000 |
+
+About 70% of the gross profit goes to costs, and the per-trade interval includes zero in every window. Buys made money in all three windows (+₹22,300 in the last year) and sells lost in all three (−₹12,200), consistent with a long bias in a rising silver market rather than a property of the rule. Average notional per trade was about ₹2.5 lakh; margin for one Mic lot is quoted as under ₹10,000 by one source, which I have not verified.
