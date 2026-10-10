@@ -1,0 +1,4 @@
+sessions,up_break,dn_break,any_break,buy_setup,sell_setup,sessions_with_setup,both_sides,trades,target_hits,stops,time_exits,period
+127,60,67,113,29,33,59,3,62,11,25,26,6M
+248,128,113,220,60,57,109,8,117,26,51,40,1Y
+498,270,213,440,115,87,187,15,202,37,74,91,2Y
