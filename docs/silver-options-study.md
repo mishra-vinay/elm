@@ -150,3 +150,15 @@ MCX lists options only on Silver (30 kg) and Silver Mini (5 kg); I found no sour
 | Prior year (Oct 24–Oct 25) | 250 | 85 | 53% | +₹200 | −₹231 to +₹254 | +₹11,400 | ₹11,200 | −₹11,000 |
 
 About 70% of the gross profit goes to costs, and the per-trade interval includes zero in every window. Buys made money in all three windows (+₹22,300 in the last year) and sells lost in all three (−₹12,200), consistent with a long bias in a rising silver market rather than a property of the rule. Average notional per trade was about ₹2.5 lakh; margin for one Mic lot is quoted as under ₹10,000 by one source, which I have not verified.
+
+## 10. Addendum — 5-minute and 15-minute bars (last 49 sessions only)
+
+Yahoo keeps only about 60 days of 5- and 15-minute silver bars, so this covers **3 Aug – 9 Oct 2026 (49 sessions)**. Same rule, same costs; `strategy_lab/silver_intraday.py`, results in `silver_intraday_resolution.csv`. Silver Micro figures are per 1 kg futures lot.
+
+| Bars | Sessions | Sessions with a setup | Trades | Win rate | Net per trade (silver price) | Silver Mic P&L | Modelled option return | Targets / stops |
+|---|---|---|---|---|---|---|---|---|
+| 5-minute | 49 | 24 (49%) | 25 | 32% | −0.21% | −₹11,900 | −5.2% of premium | 2 / 10 |
+| 15-minute | 49 | 24 (49%) | 25 | 32% | −0.21% | −₹11,900 | −5.2% | 2 / 10 |
+| 1-hour, same days | 49 | 24 (49%) | 25 | 32% | −0.25% | −₹14,100 | −5.8% | 1 / 10 |
+
+Finer bars find the same 25 trades with the same outcomes (entry times differ in 14 of 25, exit reasons in none). With 5-minute bars the optimistic and conservative same-bar rules give identical results, so the ambiguity that limited the hourly test is gone for this window and the conservative figure is the true one. Pullback depth 0% / 2% gives 48–49 / 10 trades; none of the 18 variants made a clear profit on options. The 15-minute check does not rescue the rule: the last two months were a losing stretch for it, consistent with the hourly result. 49 sessions is too few to estimate an edge either way.
