@@ -103,6 +103,8 @@ Disk planning, as an estimate only: a busy instrument produces on the order of 5
 **Same engine for backtests.** `python -m dryrun.replay --symbol BAJFINANCE --interval 1m --from 2026-01-01 --to 2026-10-09` runs the live
 engine over stored candles (open→low→high→close inside each bar for up bars, open→high→low→close for down bars, so use 1-minute data).
 
+**Simulated data is kept out of real analysis.** Candles saved while `FEED_MODE=sim` are tagged `source=sim` and are never used as previous-day levels. Still, before switching to Dhan for good, start from a clean database (`sudo systemctl stop dryrun && rm -f /opt/dryrun/data/dryrun.db* && sudo systemctl start dryrun`), so test runs don't clutter your history.
+
 ## Dashboard
 
 1. **Start a dry run** — search box (name, symbol, security id, or `NSE_FNO:48704`-style), the settings above, and manual High/Low fields that appear if none are found.

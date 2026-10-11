@@ -101,7 +101,7 @@
       <input id="bf_days" type="number" value="365" style="width:90px" title="intraday days (max ~1825)">
       <button onclick="backfill()">Download history</button>
       <button onclick="refreshMaster()">Reload instrument list</button></div>
-    <div class="small muted" id="dataMsg" style="margin-top:6px"></div>
+    <div class="small muted" id="dataMsg" style="margin-top:6px"></div><div class="small" id="instCount" style="margin-top:4px"></div>
     <div class="tbl"><table id="watchT"><thead><tr><th>Collecting</th><th class="num">Last</th><th class="num">Ticks</th><th class="num">Prev close</th><th class="num">Bad ticks</th></tr></thead><tbody></tbody></table></div>
     <div class="tbl" style="margin-top:8px"><table id="dataT"><thead><tr><th>Stored candles</th><th>Interval</th><th class="num">Rows</th><th>From</th><th>To</th></tr></thead><tbody></tbody></table></div>
   </section>
@@ -170,7 +170,7 @@ async function stopRun(id) { await api(`/api/runs/${id}/stop`, {method:"POST"});
 async function watch(on) { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; } await api("/api/watch", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, on})}); refresh(); }
 async function backfill() { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; }
   try { await api("/api/backfill", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, intraday_days:Number($("bf_days").value), interval:Number($("bf_int").value)})}); $("dataMsg").textContent = "download started"; } catch (e) { $("dataMsg").textContent = e.message; } }
-async function refreshMaster() { await api("/api/instruments/refresh", {method:"POST"}); $("dataMsg").textContent = "instrument list is reloading in the background"; }
+async function refreshMaster() { await api("/api/instruments/refresh", {method:"POST"}); $("dataMsg").textContent = "Downloading Dhan's instrument list (about 35 MB, under a minute). The count below updates when it finishes."; }
 async function setToken() { try { await api("/api/feed/token", {method:"POST", body:JSON.stringify({token:$("tok").value})}); $("tok").value = ""; $("tokMsg").textContent = "token updated, feed reconnecting"; } catch (e) { $("tokMsg").textContent = e.message; } }
 
 function chart(canvas, r) {
@@ -238,7 +238,7 @@ async function refresh() {
   } catch (e) { if (e.message !== "login required") $("feedBadge").textContent = "dashboard offline"; }
 }
 async function refreshData() {
-  try { const {data} = await api("/api/data/summary");
+  try { const {data} = await api("/api/data/summary"); $("instCount").textContent = `Instruments loaded: ${data.instruments.toLocaleString()}` + (data.instruments < 100 ? " (starter list only; click Reload instrument list)" : "");
     $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${c.symbol} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td>${String(c.from).slice(0, 16)}</td><td>${String(c.to).slice(0, 16)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
     if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}`).join(" | ");
   } catch (e) {}

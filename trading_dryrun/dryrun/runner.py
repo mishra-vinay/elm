@@ -190,8 +190,9 @@ class RunManager:
                 self._run_tick(run, ts, ft.ltp)
 
     def _store_bar(self, instrument_id: int, bar):
+        source = "sim" if self.s.feed_mode == "sim" else "live"       # simulated prices must never pass as market data
         self.writer.submit(lambda s: s.add(Candle(instrument_id=instrument_id, interval="1m", ts=bar.ts, open=bar.open,
-                                                  high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source="live")))
+                                                  high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=source)))
 
     def _flush_ticks(self):
         if self._tick_buf:

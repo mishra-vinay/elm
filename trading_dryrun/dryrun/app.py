@@ -298,7 +298,9 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
                                     func.min(Candle.ts), func.max(Candle.ts))
                              .join(Candle, Candle.instrument_id == Instrument.id).group_by(Instrument.id, Candle.interval)).all()
             ticks = s.scalar(select(func.count()).select_from(Tick)) or 0
-        return {"candles": [{"symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5], "to": r[6]} for r in rows],
+        with factory() as s2:
+            n_inst = s2.scalar(select(func.count()).select_from(Instrument)) or 0
+        return {"instruments": n_inst, "candles": [{"symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5], "to": r[6]} for r in rows],
                 "ticks": ticks, "jobs": list(jobs.values())}
 
     @app.post("/api/feed/token", dependencies=[Depends(need_auth)])

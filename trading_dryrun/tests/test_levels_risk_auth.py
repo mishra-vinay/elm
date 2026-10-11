@@ -187,3 +187,20 @@ def test_example_env_file_loads_and_starts(tmp_path, monkeypatch):
     for k in ("FEED_MODE", "PORT", "HOST", "STORE_TICKS", "TICK_RETENTION_DAYS", "STALE_TICK_SECONDS", "DATABASE_URL", "FEED_PACKET",
               "DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN", "DASHBOARD_PASSWORD", "SECRET_KEY"):
         monkeypatch.delenv(k, raising=False)
+
+
+def test_simulated_candles_never_become_levels_and_dhan_daily_beats_derived(factory):
+    i = inst(factory)
+    today = date(2026, 10, 12)
+    sim = [{"ts": datetime(2026, 10, 11, 13, 55) + timedelta(minutes=k), "open": 100, "high": 105, "low": 95, "close": 100} for k in range(3)]
+    store_candles(factory, i.id, "1m", sim, "sim")
+    assert levels.from_db(factory, i, today) is None                       # fake prices are ignored
+    live = [{"ts": datetime(2026, 10, 9, 10, 0) + timedelta(minutes=k), "open": 960, "high": 970, "low": 950, "close": 960} for k in range(3)]
+    store_candles(factory, i.id, "1m", live, "live")
+    assert levels.from_db(factory, i, today).source == "derived"
+
+    class FakeRest:
+        def daily(self, *a, **k):
+            return [{"ts": datetime(2026, 10, 9), "open": 958, "high": 975.0, "low": 948.0, "close": 965}]
+    lv = levels.resolve(factory, i, today, rest=FakeRest())
+    assert (lv.source, lv.high, lv.low) == ("candles", 975.0, 948.0)       # Dhan's daily candle, not our derived 970/950
