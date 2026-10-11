@@ -78,6 +78,15 @@ class DailyLevel(Base):
     __table_args__ = (UniqueConstraint("instrument_id", "for_date"),)
 
 
+class Watch(Base):
+    """Instruments you asked the system to look after: record live ticks and/or keep history updated after the close."""
+    __tablename__ = "watchlist"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), unique=True)
+    collect_live: Mapped[bool] = mapped_column(Boolean, default=False)
+    daily_update: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Run(Base):
     __tablename__ = "runs"
     id: Mapped[int] = mapped_column(primary_key=True)

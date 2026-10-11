@@ -66,18 +66,28 @@ def from_db(factory: sessionmaker, inst: Instrument, for_date: date, allow_deriv
     return None
 
 
+def _prev_weekday(d: date) -> date:
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 def resolve(factory: sessionmaker, inst: Instrument, for_date: date, rest=None) -> Levels | None:
     lv = from_db(factory, inst, for_date, allow_derived=False)       # manual, then a stored daily candle
-    if lv is not None:
+    # a stored candle older than the previous weekday may be stale (a missed download); try to refresh it from Dhan.
+    # (A holiday also makes it look older; then the refresh finds nothing newer and the stored one is kept.)
+    stale = lv is not None and lv.source == "candles" and lv.from_date is not None and lv.from_date < _prev_weekday(for_date)
+    if lv is not None and not stale:
         return lv
     if rest is not None:                                             # Dhan's own daily candle beats our derived figure
         from .history import store_candles
         try:
             rows = rest.daily(inst.segment, inst.security_id, inst.instrument, for_date - timedelta(days=12), for_date)
             store_candles(factory, inst.id, "D", rows, "api")
-            lv = from_db(factory, inst, for_date, allow_derived=False)
-            if lv is not None:
-                return lv
+            fresh = from_db(factory, inst, for_date, allow_derived=False)
+            if fresh is not None:
+                return fresh
         except Exception:      # noqa: BLE001  (fall through to what we have stored)
             pass
-    return from_db(factory, inst, for_date)
+    return lv if lv is not None else from_db(factory, inst, for_date)

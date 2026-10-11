@@ -105,6 +105,18 @@ engine over stored candles (open→low→high→close inside each bar for up bar
 
 **Simulated data is kept out of real analysis.** Candles saved while `FEED_MODE=sim` are tagged `source=sim` and are never used as previous-day levels. Still, before switching to Dhan for good, start from a clean database (`sudo systemctl stop dryrun && rm -f /opt/dryrun/data/dryrun.db* && sudo systemctl start dryrun`), so test runs don't clutter your history.
 
+## Market data collection: what each button does
+
+* **Download history** — pulls candles from Dhan into `candles` (daily from inception; 1/5/15/25/60-minute for the number of days you enter, up to about 5 years).
+  It is **incremental**: a second click fetches only what is newer than what you already have (the last stored day is fetched again to complete it), so it is quick and never creates duplicates.
+  Dhan's official candles also replace any candle the app built itself from live ticks. The tick box *keep updated after close* adds the instrument to the list that is refreshed automatically every weekday after 16:05 IST;
+  **Update all now** does the same on demand.
+* **Collect live ticks / Stop collecting** — subscribes the instrument to the live feed and saves every price update (`ticks`) and a 1-minute candle (`source=live`) **without running the strategy**.
+  The choice is remembered, so collection resumes after a restart. Starting a dry run does the same for its own instrument automatically.
+* **Reload instrument list** — only refreshes the list of names and ids (stocks, indices, futures; no options). It never touches stored candles.
+* **Delete** (per row in *Stored candles*) — removes that instrument's candles for that interval. Runs, signals and trades are never deleted by it.
+* **Previous-day High/Low** next morning: manual entry → the stored daily candle of the last trading day → if that candle is older than the previous weekday, a fresh fetch from Dhan → levels derived from stored real intraday candles. The run's timeline shows which source and which date were used.
+
 ## Dashboard
 
 1. **Start a dry run** — search box (name, symbol, security id, or `NSE_FNO:48704`-style), the settings above, and manual High/Low fields that appear if none are found.

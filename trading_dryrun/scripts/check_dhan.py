@@ -40,6 +40,13 @@ try:
         print("   daily", r["ts"].date(), "O/H/L/C", r["open"], r["high"], r["low"], r["close"])
     i = rest.intraday("IDX_I", "13", "INDEX", 5, today - timedelta(days=4), today)
     print(f"   intraday 5-min bars: {len(i)}; first {i[0]['ts']}  last {i[-1]['ts']}  (expect 09:15 .. 15:25 IST)")
+    m = rest.intraday("NSE_EQ", "317", "EQUITY", 1, today - timedelta(days=6), today)
+    by_day = {}
+    for r in m:
+        by_day.setdefault(r["ts"].date(), []).append(r["ts"])
+    print("   1-minute bars per day for Bajaj Finance (an NSE session has 375: 09:15 .. 15:29):")
+    for dte, ts in sorted(by_day.items()):
+        print(f"     {dte}: {len(ts)} bars, first {min(ts):%H:%M}, last {max(ts):%H:%M}")
 except Exception as e:      # noqa: BLE001
     print("   FAILED:", e)
 

@@ -12,12 +12,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, distinct, func, select
 
 from . import instruments as instr
 from .auth import COOKIE, Auth, OtpService
 from .config import Settings
-from .db import Candle, Instrument, Run, Signal, Tick, Trade, init_db
+from .db import Candle, Instrument, Run, Signal, Tick, Trade, Watch, init_db
 from .dhan_feed import DhanFeed
 from .dhan_rest import DhanRest
 from .history import backfill
@@ -60,6 +60,7 @@ class BackfillIn(BaseModel):
     instrument_id: int
     intraday_days: int = Field(365, ge=0, le=1825)
     interval: int = 1
+    keep_updated: bool = True          # also refresh this instrument every weekday after the close
 
 
 class PasswordIn(BaseModel):
@@ -279,6 +280,8 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
             raise HTTPException(400, "interval must be 1, 5, 15, 25 or 60")
         job = {"instrument": inst.label, "status": "running", "message": "starting", "result": None}
         jobs[inst.id] = job
+        if body.keep_updated:
+            manager.set_watch_flags(inst.id, daily_update=True)
 
         def work():
             try:
@@ -291,17 +294,39 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         threading.Thread(target=work, daemon=True).start()
         return job
 
+    @app.delete("/api/candles", dependencies=[Depends(need_auth)])
+    def delete_candles(instrument_id: int, interval: str | None = None):
+        """Delete stored candles for one instrument (all intervals, or just one). Runs, trades and signals are untouched."""
+        if interval is not None and interval not in ("D", "1m", "5m", "15m", "25m", "60m"):
+            raise HTTPException(400, "unknown interval")
+        q = delete(Candle).where(Candle.instrument_id == instrument_id)
+        if interval is not None:
+            q = q.where(Candle.interval == interval)
+        with factory() as s:
+            n = s.execute(q).rowcount or 0
+            s.commit()
+        return {"deleted": n}
+
+    @app.post("/api/update-now", dependencies=[Depends(need_auth)])
+    def update_now():
+        if rest is None:
+            raise HTTPException(400, "Dhan credentials are not configured")
+        threading.Thread(target=manager.update_history_now, daemon=True).start()
+        return {"started": True}
+
     @app.get("/api/data/summary", dependencies=[Depends(need_auth)])
     def data_summary():
         with factory() as s:
             rows = s.execute(select(Instrument.id, Instrument.symbol, Instrument.segment, Candle.interval, func.count(),
-                                    func.min(Candle.ts), func.max(Candle.ts))
+                                    func.min(Candle.ts), func.max(Candle.ts), func.count(distinct(func.date(Candle.ts))))
                              .join(Candle, Candle.instrument_id == Instrument.id).group_by(Instrument.id, Candle.interval)).all()
             ticks = s.scalar(select(func.count()).select_from(Tick)) or 0
-        with factory() as s2:
-            n_inst = s2.scalar(select(func.count()).select_from(Instrument)) or 0
-        return {"instruments": n_inst, "candles": [{"symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5], "to": r[6]} for r in rows],
-                "ticks": ticks, "jobs": list(jobs.values())}
+            n_inst = s.scalar(select(func.count()).select_from(Instrument)) or 0
+            watch = [{"instrument": i.label, "collect_live": w.collect_live, "daily_update": w.daily_update}
+                     for w, i in s.execute(select(Watch, Instrument).join(Instrument, Instrument.id == Watch.instrument_id))]
+        return {"instruments": n_inst, "ticks": ticks, "jobs": list(jobs.values()), "watchlist": watch,
+                "candles": [{"instrument_id": r[0], "symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5],
+                             "to": r[6], "days": r[7], "per_day": round(r[4] / r[7], 1) if r[7] else None} for r in rows]}
 
     @app.post("/api/feed/token", dependencies=[Depends(need_auth)])
     async def set_token(body: TokenIn):

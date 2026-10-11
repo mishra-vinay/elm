@@ -21,8 +21,9 @@ from sqlalchemy.orm import sessionmaker
 from . import levels as levels_mod
 from .candles import MinuteAggregator
 from .config import IST, Settings, session_for
-from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, purge_old_ticks
+from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, Watch, purge_old_ticks
 from .dhan_feed import FeedNote, FeedTick
+from .history import backfill, store_live_bar
 from .risk import RiskContext, RiskEngine
 from .strategy import BreakoutPullbackEngine, Event, Params
 
@@ -132,6 +133,7 @@ class RunManager:
         self._prev_msg: datetime | None = None
         self._task: asyncio.Task | None = None
         self._last_purge = datetime.min
+        self._last_update: date | None = None
         self.notes: deque = deque(maxlen=30)
 
     # ------------------------------------------------------------------ lifecycle
@@ -143,6 +145,12 @@ class RunManager:
             s.commit()
         self.feed = self.feed_factory(self._on_tick, self._on_note, self._on_status)
         await self.feed.start()
+        with self.factory() as s:                                   # live collection survives restarts
+            for w, inst in s.execute(select(Watch, Instrument).join(Instrument, Instrument.id == Watch.instrument_id)
+                                     .where(Watch.collect_live.is_(True))):
+                key = (inst.segment, inst.security_id)
+                self.states[key] = InstState(inst, watch=True)
+                await self.feed.subscribe([key])
         self._task = asyncio.create_task(self._supervisor(), name="supervisor")
 
     async def stop(self):
@@ -192,8 +200,7 @@ class RunManager:
 
     def _store_bar(self, instrument_id: int, bar):
         source = "sim" if self.s.feed_mode == "sim" else "live"       # simulated prices must never pass as market data
-        self.writer.submit(lambda s: s.add(Candle(instrument_id=instrument_id, interval="1m", ts=bar.ts, open=bar.open,
-                                                  high=bar.high, low=bar.low, close=bar.close, volume=bar.volume, source=source)))
+        self.writer.submit(lambda s: store_live_bar(s, instrument_id, bar, source))
 
     def _flush_ticks(self):
         if self._tick_buf:
@@ -295,6 +302,10 @@ class RunManager:
                             self.finalize(run, "finished", "squareoff")
                         elif int(now.timestamp()) % 5 == 0:
                             self._update_run(run)
+                    if (self.rest is not None and now.weekday() < 5 and now.time() >= time(16, 5)
+                            and self._last_update != now.date()):
+                        self._last_update = now.date()
+                        asyncio.get_running_loop().run_in_executor(None, self.update_history_now)
                     if (now - self._last_purge) > timedelta(hours=6):
                         self._last_purge = now
                         asyncio.get_running_loop().run_in_executor(None, purge_old_ticks, self.factory, self.s.tick_retention_days)
@@ -386,7 +397,7 @@ class RunManager:
             key = (inst.segment, inst.security_id)
             if key not in self.states:
                 self.states[key] = InstState(inst)
-        self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}). "
+        self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}{', day ' + str(lv.from_date) if lv.from_date else ''}). "
                         f"Pullback {params.pullback_pct}%, target {params.target_pct}%, stop "
                         f"{'none' if params.stop_pct is None else str(params.stop_pct) + '%'}.")
         await self.feed.subscribe([key])
@@ -403,7 +414,41 @@ class RunManager:
             self.finalize(run, "stopped", "manual")
             return True
 
+    def set_watch_flags(self, inst_id: int, collect_live: bool | None = None, daily_update: bool | None = None):
+        def op(s):
+            w = s.scalar(select(Watch).where(Watch.instrument_id == inst_id))
+            if w is None:
+                w = Watch(instrument_id=inst_id, collect_live=False, daily_update=False)
+                s.add(w)
+            if collect_live is not None:
+                w.collect_live = collect_live
+            if daily_update is not None:
+                w.daily_update = daily_update
+        self.writer.submit(op)
+
+    def update_history_now(self) -> dict:
+        """Incrementally bring stored history up to date for every instrument flagged for daily updates."""
+        if self.rest is None:
+            return {"updated": 0, "error": "no Dhan credentials"}
+        done, failed = [], []
+        with self.factory() as s:
+            targets = [(inst, w) for w, inst in s.execute(select(Watch, Instrument).join(
+                Instrument, Instrument.id == Watch.instrument_id).where(Watch.daily_update.is_(True)))]
+        for inst, _w in targets:
+            try:
+                with self.factory() as s:
+                    stored = s.scalars(select(Candle.interval).where(Candle.instrument_id == inst.id).distinct()).all()
+                ivs = tuple(sorted({int(i[:-1]) for i in stored if i.endswith("m") and i[:-1].isdigit()})) or (1,)
+                res = backfill(self.factory, self.rest, inst, intraday_days=10 if stored else 0, intervals=ivs)
+                done.append(f"{inst.symbol}: +{res['daily']} daily, +{res['intraday']} intraday")
+            except Exception as e:      # noqa: BLE001
+                failed.append(f"{inst.symbol}: {str(e)[:120]}")
+        msg = "after-close update: " + ("; ".join(done) or "nothing to update") + (" | FAILED " + "; ".join(failed) if failed else "")
+        self._on_status("warn" if failed else "info", msg)
+        return {"updated": len(done), "failed": failed, "detail": done}
+
     async def watch(self, inst: Instrument, on: bool = True):
+        self.set_watch_flags(inst.id, collect_live=on)
         key = (inst.segment, inst.security_id)
         with self.lock:
             st = self.states.get(key)
@@ -467,7 +512,7 @@ class RunManager:
                     unreal = sign * (r.last_price - pos.entry_price) / pos.entry_price * 100
                 runs.append({
                     "id": r.id, "instrument": r.inst.label, "symbol": r.inst.symbol, "status": r.status,
-                    "high": r.levels.high, "low": r.levels.low, "levels_source": r.levels.source,
+                    "high": r.levels.high, "low": r.levels.low, "levels_source": r.levels.source + (f" {r.levels.from_date}" if r.levels.from_date else ""),
                     "buy_trigger": e.buy_entry_level, "sell_trigger": e.sell_entry_level,
                     "break_up": e.break_up_level, "break_down": e.break_down_level,
                     "armed_buy": e.armed["BUY"], "armed_sell": e.armed["SELL"],

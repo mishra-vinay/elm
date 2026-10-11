@@ -102,10 +102,12 @@
       <select id="bf_int"><option value="1">1-min</option><option value="5">5-min</option><option value="15">15-min</option><option value="60">60-min</option></select>
       <input id="bf_days" type="number" value="365" style="width:90px" title="intraday days (max ~1825)">
       <button onclick="backfill()">Download history</button>
+      <label class="small" style="display:inline-flex;gap:4px;align-items:center;margin:0"><input type="checkbox" id="bf_keep" checked style="width:auto"> keep updated after close</label>
+      <button onclick="updateNow()" title="fetch anything newer for every instrument marked 'keep updated'">Update all now</button>
       <button onclick="refreshMaster()">Reload instrument list</button></div>
-    <div class="small muted" id="dataMsg" style="margin-top:6px"></div><div class="small" id="instCount" style="margin-top:4px"></div>
+    <div class="small muted" id="dataMsg" style="margin-top:6px"></div><div class="small" id="instCount" style="margin-top:4px"></div><div class="small muted" id="watchInfo" style="margin-top:2px"></div>
     <div class="tbl"><table id="watchT"><thead><tr><th>Collecting</th><th class="num">Last</th><th class="num">Ticks</th><th class="num">Prev close</th><th class="num">Bad ticks</th></tr></thead><tbody></tbody></table></div>
-    <div class="tbl" style="margin-top:8px"><table id="dataT"><thead><tr><th>Stored candles</th><th>Interval</th><th class="num">Rows</th><th>From</th><th>To</th></tr></thead><tbody></tbody></table></div>
+    <div class="tbl" style="margin-top:8px"><table id="dataT"><thead><tr><th>Stored candles</th><th>Interval</th><th class="num">Rows</th><th class="num">Days</th><th class="num">Bars/day</th><th>From</th><th>To</th><th></th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="tokenBox" style="display:none"><h2>Dhan access token</h2>
@@ -173,7 +175,12 @@ async function startRun() {
 async function stopRun(id) { await api(`/api/runs/${id}/stop`, {method:"POST"}); refresh(); }
 async function watch(on) { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; } await api("/api/watch", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, on})}); refresh(); }
 async function backfill() { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; }
-  try { await api("/api/backfill", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, intraday_days:Number($("bf_days").value), interval:Number($("bf_int").value)})}); $("dataMsg").textContent = "download started"; } catch (e) { $("dataMsg").textContent = e.message; } }
+  try { await api("/api/backfill", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, intraday_days:Number($("bf_days").value), interval:Number($("bf_int").value), keep_updated:$("bf_keep").checked})}); $("dataMsg").textContent = "download started"; } catch (e) { $("dataMsg").textContent = e.message; } }
+async function updateNow() { try { await api("/api/update-now", {method:"POST"}); $("dataMsg").textContent = "updating stored history in the background"; } catch (e) { $("dataMsg").textContent = e.message; } }
+async function delCandles(id, interval, label) {
+  if (!confirm(`Delete stored ${interval === "all" ? "" : interval + " "}candles for ${label}? This cannot be undone. Runs and trades are kept.`)) return;
+  try { const {data} = await api(`/api/candles?instrument_id=${id}` + (interval === "all" ? "" : `&interval=${interval}`), {method:"DELETE"}); $("dataMsg").textContent = `deleted ${data.deleted.toLocaleString()} candles`; refreshData(); } catch (e) { $("dataMsg").textContent = e.message; }
+}
 async function refreshMaster() { await api("/api/instruments/refresh", {method:"POST"}); $("dataMsg").textContent = "Downloading Dhan's instrument list (about 35 MB, under a minute). The count below updates when it finishes."; }
 async function setToken() { try { await api("/api/feed/token", {method:"POST", body:JSON.stringify({token:$("tok").value})}); $("tok").value = ""; $("tokMsg").textContent = "token updated, feed reconnecting"; } catch (e) { $("tokMsg").textContent = e.message; } }
 
@@ -244,8 +251,9 @@ async function refresh() {
 }
 async function refreshData() {
   try { const {data} = await api("/api/data/summary"); $("instCount").textContent = `Instruments loaded: ${data.instruments.toLocaleString()}` + (data.instruments < 100 ? " (starter list only; click Reload instrument list)" : "");
-    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${c.symbol} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td>${String(c.from).slice(0, 16)}</td><td>${String(c.to).slice(0, 16)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
-    if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}`).join(" | ");
+    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${c.symbol} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td class="num">${c.days}</td><td class="num">${c.interval === "D" ? "–" : c.per_day}</td><td>${String(c.from).slice(0, 16)}</td><td>${String(c.to).slice(0, 16)}</td><td><button class="danger" onclick="delCandles(${c.instrument_id}, '${c.interval}', '${c.symbol}')">Delete</button></td></tr>`).join("") || `<tr><td colspan="8" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
+    if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}` + (j.result ? ` (added ${j.result.daily.toLocaleString()} daily, ${j.result.intraday.toLocaleString()} intraday candles)` : "")).join(" | ");
+    $("watchInfo").textContent = data.watchlist.length ? "Watch list: " + data.watchlist.map(w => `${w.instrument}${w.collect_live ? " [live ticks]" : ""}${w.daily_update ? " [updated daily after close]" : ""}`).join("; ") : "";
   } catch (e) {}
 }
 (async function init() {
