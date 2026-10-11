@@ -130,6 +130,12 @@ Header on every page: feed status, number of active runs, clock (IST), and a CSV
 A run is for **one trading day**: it squares off at the session's square-off time and is finalised. A run started when the market is closed is scheduled for the next session. If the app restarts mid-run, that run is marked *interrupted* (stored ticks remain) rather than silently resumed with lost state.
 Real-order live trading is **not part of this phase**; the page says so and nothing in the app can place an order.
 
+## Speed
+
+`python scripts/benchmark.py` builds a throw-away database (600k ticks, about 470k one-minute candles) and times what each page asks for plus the live-tick path. Typical results on a 2026 laptop-class CPU: every page call 1-15 ms (the Market-data summary, the heaviest query, is cached for 20 s),
+about 70,000 ticks per second through the strategy and candles for 5 active runs, and about 40,000 rows per second into the database; real feeds deliver far less (tens of ticks per second per busy instrument). Peak memory about 150 MB, so a 1 GB instance is enough.
+Other measures: responses are gzipped, pages stop polling while the browser tab is hidden, the instrument list (35 MB) is downloaded at most once per 20 hours at start-up, and history queries load run instruments in a single query.
+
 ## Login
 
 * **Default: none.** The app then listens on `127.0.0.1` only and **refuses to start** on any other address without a login. Reach it through an SSH tunnel.

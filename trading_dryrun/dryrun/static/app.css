@@ -11,7 +11,10 @@ nav a { padding:5px 12px; border-radius:6px; color:var(--ink2); text-decoration:
 nav a:hover { background:var(--chip); } nav a.on { background:var(--blue); color:#fff; }
 .badge { padding:2px 8px; border-radius:10px; background:var(--chip); color:var(--ink2); font-size:12px; }
 .badge.warn { background:var(--amber); color:#fff; } .badge.ok { background:var(--green); color:#fff; } .badge.bad { background:var(--red); color:#fff; }
-main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+html, body { max-width:100%; }
+main { width:85%; margin:0 auto; padding:16px 0; display:grid; gap:16px; }
+main > section { min-width:0; }                       /* grid children may shrink below their content, so wide tables cannot push the page wider */
+@media (max-width: 900px) { main { width:96%; } }
 section { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
 h2 { font-size:14px; margin:0 0 10px; } .muted { color:var(--muted); } .small { font-size:12px; }
 label { display:block; font-size:12px; color:var(--ink2); margin-bottom:2px; }
@@ -20,8 +23,10 @@ input { width:100%; } button { cursor:pointer; } button.primary { background:var
 button.danger { color:var(--red); border-color:var(--red); } button:disabled { opacity:.5; cursor:default; }
 .grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
 .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); font-size:13px; white-space:nowrap; }
-th { color:var(--ink2); font-weight:600; } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); font-size:12.5px; vertical-align:top; white-space:normal; overflow-wrap:anywhere; }
+.nw, td button { white-space:nowrap; }
+th { color:var(--ink2); font-weight:600; } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .warnc { color:var(--amber); } .pos { color:var(--green); } .neg { color:var(--red); }
 .run { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
 .run h3 { margin:0; font-size:15px; } .kv { display:flex; flex-wrap:wrap; gap:6px 18px; margin:6px 0; } .kv b { font-variant-numeric:tabular-nums; }

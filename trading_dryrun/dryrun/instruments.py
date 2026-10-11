@@ -12,7 +12,7 @@ import re
 from datetime import date, datetime
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 from .db import Instrument
@@ -83,6 +83,16 @@ def upsert(factory: sessionmaker, rows: list[dict]) -> int:
                     setattr(cur, k, v)
         s.commit()
         return n
+
+
+def refreshed_recently(factory: sessionmaker, hours: float = 20) -> bool:
+    """True if the instrument list was loaded within `hours` (the activity log records every successful load)."""
+    from datetime import timedelta
+    from .db import ApiLog, now_ist
+    with factory() as s:
+        n_inst = s.scalar(select(func.count()).select_from(Instrument)) or 0
+        last = s.scalar(select(func.max(ApiLog.ts)).where(ApiLog.source == "data", ApiLog.message.like("Instrument list loaded%")))
+    return n_inst > 1000 and last is not None and now_ist() - last < timedelta(hours=hours)
 
 
 def seed_defaults(factory: sessionmaker) -> None:

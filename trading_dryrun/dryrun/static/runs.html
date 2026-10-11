@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dry runs · Dry-run trading</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
 <div id="hdr"></div>
@@ -52,7 +52,7 @@
 
   <section id="activity"></section>
 </main>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=2"></script>
 <script>
 let picked = null, autoLevels = null, lastPreview = null;
 
@@ -114,7 +114,9 @@ function chart(canvas, r) {
 }
 
 const setting = p => `${p.pullback_pct} / ${p.target_pct} / ${p.stop_pct ?? "none"}`;
+let lastRuns = [];
 function renderRuns(runs) {
+  lastRuns = runs;
   $("stopAll").style.display = runs.length > 1 ? "" : "none";
   $("runSummary").innerHTML = runs.length ? `<table><thead><tr><th>#</th><th>Name</th><th>Instrument</th><th>Pullback / target / stop %</th><th>Status</th><th class="num">Last</th><th>Position</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th></th></tr></thead><tbody>${runs.map(r => {
     const pos = r.position;
@@ -138,7 +140,7 @@ function renderRuns(runs) {
   runs.forEach(r => chart($("c" + r.id), r));
 }
 function renderHist(h) {
-  $("hist").querySelector("tbody").innerHTML = h.map(r => `<tr><td>${r.id}</td><td>${esc(r.label)}</td><td>${r.date}</td><td>${esc(r.instrument)}</td><td>${setting(r.settings)}</td><td>${r.status}</td>
+  $("hist").querySelector("tbody").innerHTML = h.map(r => `<tr><td>${r.id}</td><td>${esc(r.label)}</td><td class="nw">${r.date}</td><td>${esc(r.instrument)}</td><td>${setting(r.settings)}</td><td>${r.status}</td>
     <td>${r.ran_ok == null ? "–" : r.ran_ok ? '<span class="pos">yes</span>' : '<span class="neg" title="' + esc(r.error || "") + '">no</span>'}</td><td class="num">${r.ticks ?? 0}</td><td class="num">${r.trades ?? "–"}</td>
     <td class="num">${r.win_rate == null ? "–" : fmt(r.win_rate * 100, 0)}</td><td class="num ${cls(r.net_pnl)}">${r.net_pnl == null ? "–" : "₹" + fmt(r.net_pnl)}</td>
     <td class="num">${r.coverage == null ? "–" : fmt(r.coverage * 100, 0) + "%"}</td><td><button onclick="showDetail(${r.id})">Details</button></td></tr>`).join("") || '<tr><td colspan="13" class="muted">Nothing yet.</td></tr>';
@@ -147,12 +149,14 @@ async function showDetail(id) {
   const {data: d} = await api("/api/runs/" + id);
   const sm = d.summary || {};
   $("detail").innerHTML = `<h2>Run ${d.id}${d.label ? " (" + esc(d.label) + ")" : ""}: ${esc(d.instrument)} · ${d.date}</h2><div class="small muted">Previous High ${fmt(d.high)} · Low ${fmt(d.low)} (${esc(d.levels_source)}) · ticks ${d.ticks} · data coverage ${sm.data_coverage == null ? "–" : fmt(sm.data_coverage * 100, 0) + "%"} · feed disconnects ${sm.feed_disconnects ?? "–"} · ${d.error ? "<span class='neg'>" + esc(d.error) + "</span>" : "no errors"}</div>
-    <div class="tbl"><table><thead><tr><th>Signal time</th><th>Kind</th><th>Side</th><th class="num">Price</th><th class="num">Level</th><th>Action</th><th>Reason</th></tr></thead><tbody>${d.signals.map(s => `<tr><td>${String(s.ts).replace("T", " ")}</td><td>${s.kind}</td><td>${s.side}</td><td class="num">${fmt(s.price)}</td><td class="num">${fmt(s.level)}</td><td>${s.action}</td><td>${esc(s.reason || "")}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No signals</td></tr>'}</tbody></table></div>
+    <div class="tbl"><table><thead><tr><th>Signal time</th><th>Kind</th><th>Side</th><th class="num">Price</th><th class="num">Level</th><th>Action</th><th>Reason</th></tr></thead><tbody>${d.signals.map(s => `<tr><td class="nw">${String(s.ts).replace("T", " ")}</td><td>${s.kind}</td><td>${s.side}</td><td class="num">${fmt(s.price)}</td><td class="num">${fmt(s.level)}</td><td>${s.action}</td><td>${esc(s.reason || "")}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No signals</td></tr>'}</tbody></table></div>
     <div class="tbl" style="margin-top:8px"><table><thead><tr><th>Side</th><th class="num">Entry</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Cost</th><th class="num">Net</th><th class="num">Net %</th></tr></thead><tbody>${d.trades.map(t => `<tr><td>${t.side}</td><td class="num">${fmt(t.entry_price)}</td><td class="num">${fmt(t.target)}</td><td class="num">${t.stop ? fmt(t.stop) : "–"}</td><td class="num">${fmt(t.exit_price)}</td><td>${t.exit_reason || "open"}</td><td class="num">${fmt(t.gross_pnl)}</td><td class="num">${fmt(t.cost)}</td><td class="num ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</td><td class="num ${cls(t.net_pct)}">${fmt(t.net_pct)}</td></tr>`).join("") || '<tr><td colspan="10" class="muted">No trades</td></tr>'}</tbody></table></div>`;
 }
 async function refresh() { try { const {data: s} = await api("/api/state"); renderRuns(s.runs); renderHist(s.history); } catch (e) {} }
 
-boot("runs", () => { refresh(); setInterval(refresh, 2000); });
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => lastRuns.forEach(r => { const cv = $("c" + r.id); if (cv) chart(cv, r); }), 150); });
+boot("runs", () => { refresh(); every(refresh, 2000); });
 </script>
 </body>
 </html>

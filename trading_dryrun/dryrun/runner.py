@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from . import levels as levels_mod
@@ -190,8 +190,8 @@ class RunManager:
                 self.activity("feed", "info", f"First price for {st.inst.symbol}: {ft.ltp:,.2f}")
             st.minutes_seen.add(ts.replace(second=0, microsecond=0))
             if self.s.store_ticks:
-                self._tick_buf.append(Tick(instrument_id=st.inst.id, ts=ts, ltp=ft.ltp, ltt=ft.ltt, volume=ft.volume,
-                                           day_high=ft.day_high, day_low=ft.day_low))
+                self._tick_buf.append({"instrument_id": st.inst.id, "ts": ts, "ltp": ft.ltp, "ltt": ft.ltt, "volume": ft.volume,
+                                       "day_high": ft.day_high, "day_low": ft.day_low})
             bar = st.agg.add(ts, ft.ltp, ft.volume)
             if bar is not None:
                 self._store_bar(st.inst.id, bar)
@@ -205,7 +205,7 @@ class RunManager:
     def _flush_ticks(self):
         if self._tick_buf:
             buf, self._tick_buf = self._tick_buf, []
-            self.writer.submit(lambda s: s.add_all(buf))
+            self.writer.submit(lambda s: s.execute(insert(Tick), buf))           # one executemany, several times faster than ORM objects
 
     # ------------------------------------------------------------------ per-run processing
     def _run_tick(self, run: LiveRun, ts: datetime, price: float):
@@ -531,6 +531,16 @@ class RunManager:
         where = "inside" if r.levels.low <= p <= r.levels.high else "outside"
         return (f"{prefix}Price {p:,.2f} is {where} yesterday's range ({r.levels.low:,.2f} to {r.levels.high:,.2f}). "
                 f"A setup starts if it trades above {e.break_up_level:,.2f} ({up_pct:+.2f}%) or below {e.break_down_level:,.2f} ({-dn_pct:+.2f}%).")
+
+    def status_snapshot(self) -> dict:
+        """Cheap version of snapshot() for the header badges that every page polls."""
+        feed, now = self.feed, self.clock()
+        with self.lock:
+            n_runs = len(self.runs)
+        return {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "mode": self.s.feed_mode, "writer_errors": self.writer.errors, "active_runs": n_runs,
+                "feed": {"connected": bool(getattr(feed, "connected", False)), "fatal": getattr(feed, "fatal", None),
+                         "disconnects": getattr(feed, "disconnects", 0), "subscribed": len(getattr(feed, "subscribed", [])),
+                         "last_message_age": None if not getattr(feed, "last_message_at", None) else round((now - feed.last_message_at).total_seconds(), 1)}}
 
     def snapshot(self) -> dict:
         now = self.clock()

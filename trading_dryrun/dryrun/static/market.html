@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Market data · Dry-run trading</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
 <div id="hdr"></div>
@@ -39,7 +39,7 @@
 
   <section id="activity"></section>
 </main>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=2"></script>
 <script>
 let dpicked = null;
 wireSearch("dq", "hits2", hit => { dpicked = hit; });
@@ -63,12 +63,12 @@ async function refresh() {
     $("watchT").querySelector("tbody").innerHTML = s.watch.map(w => `<tr><td>${esc(w.instrument)}</td><td class="num">${fmt(w.last_price)}</td><td class="num">${w.ticks}</td><td class="num">${fmt(w.prev_close)}</td><td class="num">${w.bad_ticks}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Nothing is being recorded outside active runs.</td></tr>';
     const {data} = await api("/api/data/summary");
     $("instCount").textContent = `Instruments loaded: ${data.instruments.toLocaleString()}` + (data.instruments < 100 ? " (starter list only; click Reload instrument list)" : "");
-    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${esc(c.symbol)} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td class="num">${c.days}</td><td class="num">${c.interval === "D" ? "–" : c.per_day}</td><td>${String(c.from).slice(0, 16)}</td><td>${String(c.to).slice(0, 16)}</td><td><button class="danger" onclick="delCandles(${c.instrument_id}, '${c.interval}', '${esc(c.symbol)}')">Delete</button></td></tr>`).join("") || `<tr><td colspan="8" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
+    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${esc(c.symbol)} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td class="num">${c.days}</td><td class="num">${c.interval === "D" ? "–" : c.per_day}</td><td class="nw">${String(c.from).slice(0, 16)}</td><td class="nw">${String(c.to).slice(0, 16)}</td><td><button class="danger" onclick="delCandles(${c.instrument_id}, '${c.interval}', '${esc(c.symbol)}')">Delete</button></td></tr>`).join("") || `<tr><td colspan="8" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
     if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}` + (j.result ? ` (added ${j.result.daily.toLocaleString()} daily, ${j.result.intraday.toLocaleString()} intraday candles)` : "")).join(" | ");
     $("watchInfo").textContent = data.watchlist.length ? "Watch list: " + data.watchlist.map(w => `${w.instrument}${w.collect_live ? " [live ticks]" : ""}${w.daily_update ? " [updated daily after close]" : ""}`).join("; ") : "";
   } catch (e) {}
 }
-boot("market", () => { refresh(); setInterval(refresh, 4000); });
+boot("market", () => { refresh(); every(refresh, 10000); });
 </script>
 </body>
 </html>

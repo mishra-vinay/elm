@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, distinct, func, select
+from sqlalchemy.orm import joinedload
 
 from . import instruments as instr
 from . import levels as levels_mod
@@ -129,6 +131,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     auth = Auth(st.auth_mode, st.dashboard_password, st.secret_key)
     otp = OtpService(st.brevo_api_key, st.brevo_sender, st.allowed_emails) if st.auth_mode == "email_otp" else None
     jobs: dict[int, dict] = {}
+    summary_cache: dict = {"at": 0.0, "data": None}
 
     def make_feed(on_tick, on_note, on_status):
         if feed_factory is not None:
@@ -148,10 +151,14 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         await manager.stop()
 
     app = FastAPI(title="Dry-run trading", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)           # JSON and scripts shrink about 5x, which matters over the internet
     app.state.manager, app.state.factory, app.state.settings, app.state.auth = manager, factory, st, auth
 
-    def _safe_refresh(f):
+    def _safe_refresh(f, force: bool = False):
         try:
+            if not force and instr.refreshed_recently(f, hours=20):
+                log.info("instrument list is fresh, skipping the download")
+                return
             manager.activity("data", "info", "Downloading Dhan's instrument list")
             n = instr.refresh_master(f)
             log.info("instrument master loaded, %s new rows", n)
@@ -232,7 +239,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     def state():
         snap = manager.snapshot()
         with factory() as s:
-            recent = s.scalars(select(Run).order_by(Run.id.desc()).limit(30)).all()
+            recent = s.scalars(select(Run).options(joinedload(Run.instrument)).order_by(Run.id.desc()).limit(30)).all()   # one query, not 31
             snap["history"] = [run_row(r) for r in recent if r.id not in manager.runs]
         snap["rest_configured"] = manager.rest is not None
         snap["version"] = "0.1.0"
@@ -241,9 +248,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     @app.get("/api/status", dependencies=[Depends(need_auth)])
     def status():
         """Small payload for the header badges on every page."""
-        snap = manager.snapshot()
-        return {"now": snap["now"], "mode": snap["mode"], "feed": snap["feed"], "writer_errors": snap["writer_errors"],
-                "active_runs": len(snap["runs"])}
+        return manager.status_snapshot()
 
     @app.get("/api/settings", dependencies=[Depends(need_auth)])
     def get_settings():
@@ -311,7 +316,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     @app.post("/api/instruments/refresh", dependencies=[Depends(need_auth)])
     def refresh():
-        threading.Thread(target=lambda: _safe_refresh(factory), daemon=True).start()
+        threading.Thread(target=lambda: _safe_refresh(factory, force=True), daemon=True).start()
         return {"started": True}
 
     @app.post("/api/runs", dependencies=[Depends(need_auth)])
@@ -389,6 +394,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         if inst is None:
             raise HTTPException(404, "instrument not found")
         await manager.watch(inst, body.on)
+        summary_cache["data"] = None
         return {"ok": True}
 
     @app.post("/api/backfill", dependencies=[Depends(need_auth)])
@@ -413,6 +419,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
                 job["result"] = backfill(factory, manager.rest, inst, intraday_days=body.intraday_days, intervals=(body.interval,),
                                          progress=lambda m: job.update(message=m))
                 job.update(status="done", message="finished")
+                summary_cache["data"] = None
                 manager.activity("data", "info", f"History download finished: {inst.symbol}, added {job['result']['daily']} daily and {job['result']['intraday']} intraday candles")
             except Exception as e:      # noqa: BLE001
                 job.update(status="error", message=str(e)[:300])
@@ -432,6 +439,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         with factory() as s:
             n = s.execute(q).rowcount or 0
             s.commit()
+        summary_cache["data"] = None
         return {"deleted": n}
 
     @app.post("/api/update-now", dependencies=[Depends(need_auth)])
@@ -444,6 +452,16 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     @app.get("/api/data/summary", dependencies=[Depends(need_auth)])
     def data_summary():
+        """Counting distinct days over every stored candle is the slowest query in the app, so the result is reused for 20 s
+        (and dropped at once after a download or delete)."""
+        import time as _t
+        if summary_cache["data"] is not None and _t.time() - summary_cache["at"] < 20:
+            return {**summary_cache["data"], "jobs": list(jobs.values())}
+        data = _summary()
+        summary_cache.update(at=_t.time(), data=data)
+        return {**data, "jobs": list(jobs.values())}
+
+    def _summary():
         with factory() as s:
             rows = s.execute(select(Instrument.id, Instrument.symbol, Instrument.segment, Candle.interval, func.count(),
                                     func.min(Candle.ts), func.max(Candle.ts), func.count(distinct(func.date(Candle.ts))))
@@ -452,7 +470,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
             n_inst = s.scalar(select(func.count()).select_from(Instrument)) or 0
             watch = [{"instrument": i.label, "collect_live": w.collect_live, "daily_update": w.daily_update}
                      for w, i in s.execute(select(Watch, Instrument).join(Instrument, Instrument.id == Watch.instrument_id))]
-        return {"instruments": n_inst, "ticks": ticks, "jobs": list(jobs.values()), "watchlist": watch,
+        return {"instruments": n_inst, "ticks": ticks, "watchlist": watch,
                 "candles": [{"instrument_id": r[0], "symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5],
                              "to": r[6], "days": r[7], "per_day": round(r[4] / r[7], 1) if r[7] else None} for r in rows]}
 

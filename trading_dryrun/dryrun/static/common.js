@@ -4,6 +4,11 @@ const fmt = (x, d = 2) => x == null ? "–" : Number(x).toLocaleString("en-IN", 
 const cls = x => x == null ? "" : x > 0 ? "pos" : x < 0 ? "neg" : "";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 let authMode = "none";
+// poll on a timer, but not while the tab is hidden (saves the server and the laptop battery); refresh at once when it comes back
+function every(fn, ms) {
+  setInterval(() => { if (!document.hidden) fn(); }, ms);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) fn(); });
+}
 const known = {};
 
 async function api(path, opts) {
@@ -77,12 +82,12 @@ function initActivity() {
     const f = e.target.dataset && e.target.dataset.f; if (!f) return;
     actFilter = f; document.querySelectorAll("#actFilters button").forEach(b => b.className = b.dataset.f === f ? "primary" : ""); refreshActivity();
   });
-  refreshActivity(); setInterval(refreshActivity, 3000);
+  refreshActivity(); every(refreshActivity, 3000);
 }
 async function refreshActivity() {
   try {
     const {data} = await api("/api/activity?limit=200&source=" + actFilter);
-    $("actT").querySelector("tbody").innerHTML = data.map(r => `<tr><td>${String(r.ts).replace("T", " ").slice(0, 19)}</td><td>${r.source}</td><td class="${r.level === "error" ? "neg" : r.level === "warn" ? "warnc" : ""}">${esc(r.message)}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">Nothing logged yet.</td></tr>';
+    $("actT").querySelector("tbody").innerHTML = data.map(r => `<tr><td class="nw">${String(r.ts).replace("T", " ").slice(0, 19)}</td><td class="nw">${r.source}</td><td class="${r.level === "error" ? "neg" : r.level === "warn" ? "warnc" : ""}">${esc(r.message)}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">Nothing logged yet.</td></tr>';
   } catch (e) {}
 }
 
@@ -91,7 +96,7 @@ async function boot(page, onReady) {
   renderHeader(page);
   const a = await (await fetch("/api/auth/status")).json(); authMode = a.mode;
   if (!a.authenticated) { showLogin(); return; }
-  refreshStatus(); setInterval(refreshStatus, 2000);
+  refreshStatus(); every(refreshStatus, 2000);
   initActivity();
   onReady();
 }

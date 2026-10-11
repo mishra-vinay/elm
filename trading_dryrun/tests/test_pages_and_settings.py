@@ -143,3 +143,52 @@ def test_save_env_value_appends_when_key_is_missing(tmp_path):
     p.write_text("A=1\n")
     save_env_value("DHAN_ACCESS_TOKEN", "xyz", str(p))
     assert p.read_text() == "A=1\nDHAN_ACCESS_TOKEN=xyz\n"
+
+
+def test_big_responses_are_gzipped_and_small_ones_are_not(tmp_path):
+    with TestClient(sim_app(tmp_path, [1.0])) as c:
+        js = c.get("/static/common.js", headers={"Accept-Encoding": "gzip"})
+        assert js.headers.get("content-encoding") == "gzip" and "renderHeader" in js.text           # decoded transparently by the client
+        small = c.get("/health", headers={"Accept-Encoding": "gzip"})
+        assert small.headers.get("content-encoding") is None
+
+
+def test_data_summary_is_cached_briefly_and_dropped_after_a_delete(tmp_path):
+    from datetime import datetime as dt
+    from dryrun.history import store_candles
+    from dryrun import instruments as instr
+    app = sim_app(tmp_path, [1.0])
+    with TestClient(app) as c:
+        f = app.state.factory
+        i = instr.search(f, "BAJFINANCE", 1)[0]
+        row = {"ts": dt(2026, 10, 9, 9, 15), "open": 1, "high": 1, "low": 1, "close": 1}
+        store_candles(f, i.id, "1m", [row], "api")
+        assert c.get("/api/data/summary").json()["candles"][0]["count"] == 1
+        store_candles(f, i.id, "1m", [{**row, "ts": dt(2026, 10, 9, 9, 16)}], "api")
+        assert c.get("/api/data/summary").json()["candles"][0]["count"] == 1          # served from the 20-second cache
+        c.delete("/api/candles", params={"instrument_id": i.id, "interval": "D"})      # any delete drops the cache
+        assert c.get("/api/data/summary").json()["candles"][0]["count"] == 2
+
+
+def test_status_snapshot_matches_what_the_header_needs(tmp_path):
+    with TestClient(sim_app(tmp_path, [1.0])) as c:
+        s = c.get("/api/status").json()
+        assert set(s) == {"now", "mode", "writer_errors", "active_runs", "feed"}
+        assert set(s["feed"]) == {"connected", "fatal", "disconnects", "subscribed", "last_message_age"}
+
+
+def test_instrument_list_download_is_skipped_when_fresh(tmp_path):
+    from dryrun import instruments as instr
+    from dryrun.db import ApiLog, Instrument, init_db
+    _e, f = init_db(f"sqlite:///{tmp_path}/r.db")
+    instr.seed_defaults(f)
+    assert instr.refreshed_recently(f) is False                                      # starter list only
+    with f() as s:
+        s.add_all([Instrument(segment="NSE_EQ", security_id=str(10000 + k), instrument="EQUITY", symbol=f"S{k}") for k in range(1100)])
+        s.commit()
+    assert instr.refreshed_recently(f) is False                                      # many rows but never loaded through the app
+    with f() as s:
+        s.add(ApiLog(source="data", level="info", message="Instrument list loaded (25000 new instruments)"))
+        s.commit()
+    assert instr.refreshed_recently(f) is True
+    assert instr.refreshed_recently(f, hours=0) is False

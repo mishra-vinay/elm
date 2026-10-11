@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings · Dry-run trading</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
 <div id="hdr"></div>
@@ -34,7 +34,7 @@
 
   <section id="activity"></section>
 </main>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=2"></script>
 <script>
 const tokenText = t => !t.set ? '<span class="neg">not set</span>' : t.expires_at == null ? "set (expiry could not be read from the token)" :
   `<span class="${t.status === "valid" ? "pos" : t.status === "expired" ? "neg" : "warnc"}">${t.status}</span> · expires ${t.expires_at} IST` + (t.seconds_left > 0 ? ` (in ${Math.floor(t.seconds_left / 3600)} h ${Math.floor(t.seconds_left % 3600 / 60)} min)` : "");
@@ -67,7 +67,7 @@ async function setToken() {
     load(); refreshActivity();
   } catch (e) { $("tokMsg").className = "small neg"; $("tokMsg").textContent = e.message; }
 }
-boot("settings", () => { load(); setInterval(load, 30000); });
+boot("settings", () => { load(); every(load, 30000); });
 </script>
 </body>
 </html>
