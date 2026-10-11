@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market data · Dry-run trading</title>
+<link rel="stylesheet" href="/static/app.css?v=2">
+</head>
+<body>
+<div id="hdr"></div>
+<main id="app">
+  <section>
+    <h2>Collect and download market data</h2>
+    <div class="row">
+      <input id="dq" list="hits2" style="max-width:380px" placeholder="instrument: name, symbol, security id or SEGMENT:ID"><datalist id="hits2"></datalist>
+      <button onclick="watch(true)" title="record every price update and 1-minute candles, without running the strategy">Collect live ticks</button>
+      <button onclick="watch(false)">Stop collecting</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <select id="bf_int"><option value="1">1-min</option><option value="5">5-min</option><option value="15">15-min</option><option value="60">60-min</option></select>
+      <input id="bf_days" type="number" value="365" style="width:90px" title="intraday days (max ~1825)"><span class="small muted">days of intraday candles</span>
+      <button onclick="backfill()">Download history</button>
+      <label class="small" style="display:inline-flex;gap:4px;align-items:center;margin:0"><input type="checkbox" id="bf_keep" checked style="width:auto"> keep updated after close</label>
+      <button onclick="updateNow()" title="fetch anything newer for every instrument marked 'keep updated'">Update all now</button>
+      <button onclick="refreshMaster()">Reload instrument list</button>
+    </div>
+    <div class="small muted" id="dataMsg" style="margin-top:6px"></div>
+    <div class="small" id="instCount" style="margin-top:4px"></div>
+    <div class="small muted" id="watchInfo" style="margin-top:2px"></div>
+    <div class="help">Starting a dry run records that instrument's prices automatically; this page is only for recording an instrument <i>without</i> trading it and for downloading history.
+      Downloads are incremental (only what is new) and Dhan's official candles replace any candle built from live ticks.</div>
+  </section>
+
+  <section><h2>Being recorded live</h2>
+    <div class="tbl"><table id="watchT"><thead><tr><th>Instrument</th><th class="num">Last</th><th class="num">Ticks today</th><th class="num">Prev close</th><th class="num">Bad ticks</th></tr></thead><tbody></tbody></table></div></section>
+
+  <section><h2>Stored candles</h2>
+    <div class="tbl"><table id="dataT"><thead><tr><th>Instrument</th><th>Interval</th><th class="num">Rows</th><th class="num">Days</th><th class="num">Bars/day</th><th>From</th><th>To</th><th></th></tr></thead><tbody></tbody></table></div></section>
+
+  <section id="activity"></section>
+</main>
+<script src="/static/common.js?v=2"></script>
+<script>
+let dpicked = null;
+wireSearch("dq", "hits2", hit => { dpicked = hit; });
+const need = () => { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return false; } return true; };
+async function watch(on) { if (!need()) return; await api("/api/watch", {method: "POST", body: JSON.stringify({instrument_id: dpicked.id, on})}); refresh(); refreshActivity(); }
+async function backfill() {
+  if (!need()) return;
+  try { await api("/api/backfill", {method: "POST", body: JSON.stringify({instrument_id: dpicked.id, intraday_days: Number($("bf_days").value), interval: Number($("bf_int").value), keep_updated: $("bf_keep").checked})}); $("dataMsg").textContent = "download started"; refreshActivity(); }
+  catch (e) { $("dataMsg").textContent = e.message; }
+}
+async function updateNow() { try { await api("/api/update-now", {method: "POST"}); $("dataMsg").textContent = "updating stored history in the background"; refreshActivity(); } catch (e) { $("dataMsg").textContent = e.message; } }
+async function delCandles(id, interval, label) {
+  if (!confirm(`Delete stored ${interval} candles for ${label}? This cannot be undone. Runs and trades are kept.`)) return;
+  try { const {data} = await api(`/api/candles?instrument_id=${id}&interval=${interval}`, {method: "DELETE"}); $("dataMsg").textContent = `deleted ${data.deleted.toLocaleString()} candles`; refresh(); refreshActivity(); } catch (e) { $("dataMsg").textContent = e.message; }
+}
+async function refreshMaster() { await api("/api/instruments/refresh", {method: "POST"}); $("dataMsg").textContent = "Downloading Dhan's instrument list (about 35 MB, under a minute). The count below updates when it finishes."; refreshActivity(); }
+
+async function refresh() {
+  try {
+    const {data: s} = await api("/api/state");
+    $("watchT").querySelector("tbody").innerHTML = s.watch.map(w => `<tr><td>${esc(w.instrument)}</td><td class="num">${fmt(w.last_price)}</td><td class="num">${w.ticks}</td><td class="num">${fmt(w.prev_close)}</td><td class="num">${w.bad_ticks}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Nothing is being recorded outside active runs.</td></tr>';
+    const {data} = await api("/api/data/summary");
+    $("instCount").textContent = `Instruments loaded: ${data.instruments.toLocaleString()}` + (data.instruments < 100 ? " (starter list only; click Reload instrument list)" : "");
+    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${esc(c.symbol)} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td class="num">${c.days}</td><td class="num">${c.interval === "D" ? "–" : c.per_day}</td><td class="nw">${String(c.from).slice(0, 16)}</td><td class="nw">${String(c.to).slice(0, 16)}</td><td><button class="danger" onclick="delCandles(${c.instrument_id}, '${c.interval}', '${esc(c.symbol)}')">Delete</button></td></tr>`).join("") || `<tr><td colspan="8" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
+    if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}` + (j.result ? ` (added ${j.result.daily.toLocaleString()} daily, ${j.result.intraday.toLocaleString()} intraday candles)` : "")).join(" | ");
+    $("watchInfo").textContent = data.watchlist.length ? "Watch list: " + data.watchlist.map(w => `${w.instrument}${w.collect_live ? " [live ticks]" : ""}${w.daily_update ? " [updated daily after close]" : ""}`).join("; ") : "";
+  } catch (e) {}
+}
+boot("market", () => { refresh(); every(refresh, 10000); });
+</script>
+</body>
+</html>
