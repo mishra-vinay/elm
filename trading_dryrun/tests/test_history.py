@@ -136,3 +136,88 @@ def test_update_history_now_uses_stored_intervals_and_flags(tmp_path):
         res = m.update_history_now()
         assert res["updated"] == 1 and not res["failed"]
         assert m.rest.intraday_calls and m.rest.intraday_calls[0][0] == 5     # refreshed the interval that was stored
+
+
+SUNDAY = datetime(2026, 10, 11, 16, 30)
+
+
+def make_closed_market_app(tmp_path, clock):
+    st = Settings(database_url=f"sqlite:///{tmp_path}/c.db", feed_mode="dhan", dhan_client_id="1234567890",
+                  dhan_access_token="x" * 40)
+    app = create_app(st, feed_factory=lambda t, n, s: ReplayFeed(t, [], START, on_note=n, on_status=s), load_master=False, clock=clock)
+    return app
+
+
+def test_levels_preview_fills_the_form_from_stored_daily_candle(tmp_path):
+    app = make_closed_market_app(tmp_path, lambda: SUNDAY)
+    with TestClient(app) as c:
+        app.state.manager.rest = None                          # no network in tests
+        i = instr.search(app.state.factory, "BAJFINANCE", 1)[0]
+        r = c.get("/api/levels", params={"instrument_id": i.id}).json()
+        assert r["found"] is False and "Download history" in r["detail"]
+        store_candles(app.state.factory, i.id, "D", [{"ts": datetime(2026, 10, 9), "open": 1, "high": 977.5, "low": 951.25, "close": 960}], "api")
+        r = c.get("/api/levels", params={"instrument_id": i.id}).json()
+        assert (r["found"], r["high"], r["low"], r["source"], r["from_date"], r["trading_date"]) == (True, 977.5, 951.25, "candles", "2026-10-09", "2026-10-12")
+
+
+def test_run_started_on_a_sunday_is_scheduled_for_monday_and_not_squared_off(tmp_path):
+    import time as _t
+    app = make_closed_market_app(tmp_path, lambda: SUNDAY)
+    with TestClient(app) as c:
+        m = app.state.manager
+        m.rest = None
+        i = instr.search(app.state.factory, "BAJFINANCE", 1)[0]
+        store_candles(app.state.factory, i.id, "D", [{"ts": datetime(2026, 10, 9), "open": 1, "high": 977.5, "low": 951.25, "close": 960}], "api")
+        r = c.post("/api/runs", json={"instrument_id": i.id})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["scheduled"] is True and body["trading_date"] == "2026-10-12" and body["levels"]["source"] == "candles"
+        _t.sleep(2.3)                                            # the supervisor has run twice; it must not square off a future session
+        run = c.get("/api/state").json()["runs"][0]
+        assert run["status"] == "waiting" and run["trading_date"] == "2026-10-12"
+        assert "Scheduled for Monday 12 Oct" in run["status_text"]
+        assert any("scheduled for Monday 12 Oct 2026" in t for _ts, t in run["log"])
+    assert m.next_session_date(datetime(2026, 10, 9, 10, 0), "NSE_EQ") == datetime(2026, 10, 9).date()    # Friday morning: today
+    assert m.next_session_date(datetime(2026, 10, 9, 16, 0), "NSE_EQ") == datetime(2026, 10, 12).date()   # Friday after square-off
+    assert m.next_session_date(datetime(2026, 10, 10, 11, 0), "NSE_EQ") == datetime(2026, 10, 12).date()  # Saturday
+
+
+def test_activity_log_collects_run_feed_data_and_risk_events(tmp_path):
+    app = make_app(tmp_path)
+    with TestClient(app) as c:
+        m = app.state.manager
+        i = instr.search(app.state.factory, "BAJFINANCE", 1)[0]
+        c.post("/api/runs", json={"instrument_id": i.id, "prev_high": 100, "prev_low": 95})
+        m.activity("data", "info", "History download finished: BAJFINANCE")
+        m.activity("data", "error", "History download failed for X: boom")
+        m.writer.flush()
+        allrows = c.get("/api/activity").json()
+        text = "\n".join(r["message"] for r in allrows)
+        assert "[BAJFINANCE] Run started" in text and "Subscribed to Bajaj Finance" in text and "simulated feed started" in text
+        assert [r["message"] for r in c.get("/api/activity", params={"source": "data"}).json()][0].startswith("History download failed")
+        assert [r["level"] for r in c.get("/api/activity", params={"source": "errors"}).json()] == ["error"]
+        assert allrows[0]["id"] > allrows[-1]["id"]                                  # newest first
+
+
+def test_stored_timestamps_are_ist_even_when_the_server_clock_is_utc(tmp_path, monkeypatch):
+    import time as _t
+    from datetime import timedelta
+    from dryrun.config import IST
+    from dryrun.db import ApiLog, Run, now_ist
+    monkeypatch.setenv("TZ", "UTC")
+    _t.tzset()
+    try:
+        _e, f = init_db(f"sqlite:///{tmp_path}/tz.db")
+        instr.seed_defaults(f)
+        i = instr.search(f, "BAJFINANCE", 1)[0]
+        with f() as s:
+            s.add(ApiLog(source="app", level="info", message="x"))
+            s.add(Run(instrument_id=i.id, trading_date=date(2026, 10, 12)))
+            s.commit()
+            log, run = s.scalar(select(ApiLog)), s.scalar(select(Run))
+        ist_now = datetime.now(IST).replace(tzinfo=None)
+        for stamp in (log.ts, run.started_at, now_ist()):
+            assert abs(stamp - ist_now) < timedelta(seconds=5)             # not 5.5 hours behind
+    finally:
+        monkeypatch.undo()
+        _t.tzset()

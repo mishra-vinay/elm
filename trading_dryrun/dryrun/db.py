@@ -12,6 +12,13 @@ from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Index,
                         UniqueConstraint, create_engine, event)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
+from .config import IST
+
+
+def now_ist() -> datetime:
+    """Current Asia/Kolkata wall-clock time as a naive datetime (the convention used for every stored time)."""
+    return datetime.now(IST).replace(tzinfo=None)
+
 
 class Base(DeclarativeBase):
     pass
@@ -74,7 +81,7 @@ class DailyLevel(Base):
     high: Mapped[float] = mapped_column(Float)
     low: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(12))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     __table_args__ = (UniqueConstraint("instrument_id", "for_date"),)
 
 
@@ -99,7 +106,7 @@ class Run(Base):
     prev_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     prev_low: Mapped[float | None] = mapped_column(Float, nullable=True)
     levels_source: Mapped[str | None] = mapped_column(String(12), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ticks_received: Mapped[int] = mapped_column(Integer, default=0)
     first_tick_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -152,7 +159,7 @@ class Trade(Base):
 class ApiLog(Base):
     __tablename__ = "api_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     source: Mapped[str] = mapped_column(String(16))           # feed | rest | app
     level: Mapped[str] = mapped_column(String(8))
     message: Mapped[str] = mapped_column(Text)
@@ -163,7 +170,7 @@ class RiskLog(Base):
     __tablename__ = "risk_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
     check: Mapped[str] = mapped_column(String(32))
     approved: Mapped[bool] = mapped_column(Boolean)
     detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -195,9 +202,10 @@ def init_db(url: str):
 
 def purge_old_ticks(factory: sessionmaker, keep_days: int) -> int:
     from sqlalchemy import delete
-    cutoff = datetime.now() - timedelta(days=keep_days)
+    cutoff = now_ist() - timedelta(days=keep_days)
     with factory() as s:
         res = s.execute(delete(Tick).where(Tick.ts < cutoff))
+        s.execute(delete(ApiLog).where(ApiLog.ts < now_ist() - timedelta(days=max(keep_days, 60))))
         s.commit()
         return res.rowcount or 0
 

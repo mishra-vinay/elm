@@ -15,9 +15,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, distinct, func, select
 
 from . import instruments as instr
+from . import levels as levels_mod
 from .auth import COOKIE, Auth, OtpService
 from .config import Settings
-from .db import Candle, Instrument, Run, Signal, Tick, Trade, Watch, init_db
+from .db import ApiLog, Candle, Instrument, Run, Signal, Tick, Trade, Watch, init_db
 from .dhan_feed import DhanFeed
 from .dhan_rest import DhanRest
 from .history import backfill
@@ -76,7 +77,7 @@ class TokenIn(BaseModel):
     token: str
 
 
-def create_app(settings: Settings | None = None, feed_factory=None, load_master: bool = True) -> FastAPI:
+def create_app(settings: Settings | None = None, feed_factory=None, load_master: bool = True, clock=None) -> FastAPI:
     st = settings or Settings()
     st.validate()
     engine, factory = init_db(st.database_url)
@@ -93,7 +94,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
             return SimFeed(on_tick, on_note, on_status, ticks_per_second=st.sim_ticks_per_second)
         return DhanFeed(st.dhan_client_id, st.dhan_access_token, on_tick, on_note, on_status, packet=st.feed_packet)
 
-    manager = RunManager(st, factory, make_feed, rest)
+    manager = RunManager(st, factory, make_feed, rest, **({"clock": clock} if clock else {}))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -108,10 +109,13 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     def _safe_refresh(f):
         try:
+            manager.activity("data", "info", "Downloading Dhan's instrument list")
             n = instr.refresh_master(f)
             log.info("instrument master loaded, %s new rows", n)
+            manager.activity("data", "info", f"Instrument list loaded ({n} new instruments)")
         except Exception as e:      # noqa: BLE001
             log.warning("instrument master download failed: %s", e)
+            manager.activity("data", "error", f"Instrument list download failed: {str(e)[:200]}")
 
     def need_auth(request: Request):
         if auth.enabled and not auth.verify(request.cookies.get(COOKIE)):
@@ -176,7 +180,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         with factory() as s:
             recent = s.scalars(select(Run).order_by(Run.id.desc()).limit(30)).all()
             snap["history"] = [run_row(r) for r in recent if r.id not in manager.runs]
-        snap["rest_configured"] = rest is not None
+        snap["rest_configured"] = manager.rest is not None
         snap["version"] = "0.1.0"
         return snap
 
@@ -191,6 +195,30 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     @app.get("/api/instruments/search", dependencies=[Depends(need_auth)])
     def search(q: str = ""):
         return [inst_dict(i) for i in instr.search(factory, q)]
+
+    @app.get("/api/levels", dependencies=[Depends(need_auth)])
+    def preview_levels(instrument_id: int):
+        """What previous-day High/Low a run started now would use (so the form can fill itself in)."""
+        with factory() as s:
+            inst = s.get(Instrument, instrument_id)
+        if inst is None:
+            raise HTTPException(404, "instrument not found")
+        trading_date = manager.next_session_date(manager.clock(), inst.segment)
+        lv = levels_mod.resolve(factory, inst, trading_date, manager.rest)
+        if lv is None:
+            return {"found": False, "trading_date": trading_date.isoformat(),
+                    "detail": "Not found in the database" + ("" if manager.rest else " (no Dhan credentials to fetch it)")
+                              + ". Download history or type the High/Low."}
+        return {"found": True, "high": lv.high, "low": lv.low, "source": lv.source,
+                "from_date": lv.from_date.isoformat() if lv.from_date else None, "trading_date": trading_date.isoformat()}
+
+    @app.get("/api/activity", dependencies=[Depends(need_auth)])
+    def activity(source: str | None = None, limit: int = 200):
+        q = select(ApiLog).order_by(ApiLog.id.desc()).limit(min(max(limit, 1), 1000))
+        if source and source != "all":
+            q = q.where(ApiLog.level == "error") if source == "errors" else q.where(ApiLog.source == source)
+        with factory() as s:
+            return [{"id": r.id, "ts": r.ts, "source": r.source, "level": r.level, "message": r.message} for r in s.scalars(q)]
 
     @app.post("/api/instruments/refresh", dependencies=[Depends(need_auth)])
     def refresh():
@@ -270,7 +298,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     @app.post("/api/backfill", dependencies=[Depends(need_auth)])
     def start_backfill(body: BackfillIn):
-        if rest is None:
+        if manager.rest is None:
             raise HTTPException(400, "Dhan credentials are not configured; historical download needs the Data API.")
         with factory() as s:
             inst = s.get(Instrument, body.instrument_id)
@@ -283,13 +311,17 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         if body.keep_updated:
             manager.set_watch_flags(inst.id, daily_update=True)
 
+        manager.activity("data", "info", f"History download started: {inst.label}, {body.interval}-minute, {body.intraday_days} days")
+
         def work():
             try:
-                job["result"] = backfill(factory, rest, inst, intraday_days=body.intraday_days, intervals=(body.interval,),
+                job["result"] = backfill(factory, manager.rest, inst, intraday_days=body.intraday_days, intervals=(body.interval,),
                                          progress=lambda m: job.update(message=m))
                 job.update(status="done", message="finished")
+                manager.activity("data", "info", f"History download finished: {inst.symbol}, added {job['result']['daily']} daily and {job['result']['intraday']} intraday candles")
             except Exception as e:      # noqa: BLE001
                 job.update(status="error", message=str(e)[:300])
+                manager.activity("data", "error", f"History download failed for {inst.symbol}: {str(e)[:300]}")
 
         threading.Thread(target=work, daemon=True).start()
         return job
@@ -309,8 +341,9 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     @app.post("/api/update-now", dependencies=[Depends(need_auth)])
     def update_now():
-        if rest is None:
+        if manager.rest is None:
             raise HTTPException(400, "Dhan credentials are not configured")
+        manager.activity("data", "info", "Update of stored history started (manual)")
         threading.Thread(target=manager.update_history_now, daemon=True).start()
         return {"started": True}
 
@@ -337,8 +370,9 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         if len(tok) < 20:
             raise HTTPException(400, "that does not look like an access token")
         st.dhan_access_token = tok
-        if rest is not None:
-            rest.token = tok
+        if manager.rest is not None:
+            manager.rest.token = tok
+        manager.activity("app", "info", "Dhan access token updated from the dashboard; reconnecting the feed")
         manager.feed.update_token(tok)
         await manager.feed.reconnect()
         return {"ok": True}

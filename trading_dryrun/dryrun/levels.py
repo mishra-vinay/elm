@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from .config import session_for
-from .db import Candle, DailyLevel, Instrument
+from .db import Candle, DailyLevel, Instrument, now_ist
 
 
 @dataclass
@@ -35,7 +35,7 @@ def set_manual(factory: sessionmaker, instrument_id: int, for_date: date, high: 
         if row is None:
             s.add(DailyLevel(instrument_id=instrument_id, for_date=for_date, high=high, low=low, source="manual"))
         else:
-            row.high, row.low, row.source, row.created_at = high, low, "manual", datetime.now()
+            row.high, row.low, row.source, row.created_at = high, low, "manual", now_ist()
         s.commit()
     return Levels(high, low, "manual")
 

@@ -26,6 +26,7 @@
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); font-size:13px; white-space:nowrap; }
   th { color:var(--ink2); font-weight:600; } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .warnc { color:var(--amber); }
   .pos { color:var(--green); } .neg { color:var(--red); }
   .run { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
   .run h3 { margin:0; font-size:15px; } .kv { display:flex; flex-wrap:wrap; gap:6px 18px; margin:6px 0; } .kv b { font-variant-numeric:tabular-nums; }
@@ -43,7 +44,7 @@
   <span class="badge" id="modeBadge">…</span>
   <span class="badge ok">DRY RUN · no orders are ever sent</span>
   <span class="badge" id="feedBadge">feed …</span>
-  <span class="muted small" id="clock"></span>
+  <span class="muted small" id="clock"></span><span class="small neg" id="dbErr"></span>
   <span style="flex:1"></span>
   <a class="small" href="/api/export/trades.csv">Download trades (CSV)</a>
 </header>
@@ -76,9 +77,9 @@
       <div><label>Daily loss limit % (empty = none)</label><input id="p_loss" type="number" step="0.1" value="2.0"></div>
     </div>
     <div id="manualBox" style="margin-top:10px" class="grid">
-      <div><label>Previous day High (optional)</label><input id="m_high" type="number" step="any" placeholder="empty = automatic"></div>
-      <div><label>Previous day Low (optional)</label><input id="m_low" type="number" step="any" placeholder="empty = automatic"></div>
-      <div class="small muted" style="grid-column:span 2;align-self:end">Leave both empty to use the database or Dhan's daily candle. Fill both to override.</div>
+      <div><label>Previous day High (filled in automatically; you can edit)</label><input id="m_high" type="number" step="any" placeholder="pick an instrument"></div>
+      <div><label>Previous day Low (filled in automatically; you can edit)</label><input id="m_low" type="number" step="any" placeholder="pick an instrument"></div>
+      <div class="small muted" id="levelNote" style="grid-column:span 2;align-self:end">Pick an instrument and its previous-day High/Low appear here.</div>
     </div>
     <div class="help">Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API.
       If neither has them you will be asked to type them in. The rule is the one backtested on silver and Bajaj Finance, which showed
@@ -114,14 +115,20 @@
     <div class="row"><input id="tok" type="password" placeholder="paste a new 24-hour token (kept in memory only)" style="max-width:520px">
     <button onclick="setToken()">Update token</button></div><div class="small muted" id="tokMsg"></div></section>
 
-  <section><h2>Feed log</h2><div id="notes" class="small muted"></div></section>
+  <section><h2>Activity log</h2>
+    <div class="row small" id="actFilters" style="margin-bottom:8px">
+      <button data-f="all" class="primary">All</button><button data-f="run">Runs</button><button data-f="feed">Market feed</button>
+      <button data-f="data">Data</button><button data-f="risk">Risk</button><button data-f="app">App</button><button data-f="errors">Errors</button>
+      <span class="muted">newest first · refreshes every 3 s</span></div>
+    <div class="tbl" style="max-height:360px;overflow:auto"><table id="actT"><thead><tr><th>Time</th><th>Source</th><th>Message</th></tr></thead><tbody></tbody></table></div>
+  </section>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
 const fmt = (x, d=2) => x == null ? "–" : Number(x).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
 const cls = x => x == null ? "" : x > 0 ? "pos" : x < 0 ? "neg" : "";
-let picked = null, authMode = "none", detailId = null; const known = {};
+let picked = null, authMode = "none", detailId = null, autoLevels = null, lastPreview = null; const known = {};
 
 async function api(path, opts) {
   const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
@@ -152,10 +159,20 @@ function wireSearch(inputId, listId, onPick) {
     }, 250);
   });
 }
-wireSearch("q", "hits", (hit, all) => { picked = hit; $("picked").textContent = hit ? `Selected: ${hit.label} · ${hit.instrument}${hit.expiry ? " · expires " + hit.expiry : ""} · lot ${hit.lot_size}` : (all.length ? `${all.length} matches, pick one from the list` : "no match"); });
+wireSearch("q", "hits", (hit, all) => { picked = hit; if (hit && hit.id !== lastPreview) previewLevels(); $("picked").textContent = hit ? `Selected: ${hit.label} · ${hit.instrument}${hit.expiry ? " · expires " + hit.expiry : ""} · lot ${hit.lot_size}` : (all.length ? `${all.length} matches, pick one from the list` : "no match"); });
 let dpicked = null;
 wireSearch("dq", "hits2", hit => { dpicked = hit; });
 
+async function previewLevels() {
+  lastPreview = picked.id; autoLevels = null; $("levelNote").textContent = "Looking up previous-day High/Low…";
+  try {
+    const {data} = await api("/api/levels?instrument_id=" + picked.id);
+    if (data.found) {
+      $("m_high").value = data.high; $("m_low").value = data.low; autoLevels = {high: data.high, low: data.low};
+      $("levelNote").textContent = `Filled in for the session on ${data.trading_date}: High ${fmt(data.high)}, Low ${fmt(data.low)} (${data.source}${data.from_date ? ", day " + data.from_date : ""}). Edit to override.`;
+    } else { $("m_high").value = ""; $("m_low").value = ""; $("levelNote").textContent = data.detail; }
+  } catch (e) { $("levelNote").textContent = "Could not look up levels: " + e.message; }
+}
 function params() {
   const n = id => $(id).value === "" ? null : Number($(id).value);
   return {pullback_pct:n("p_pullback") ?? 0, target_pct:n("p_target"), stop_pct:n("p_stop"), qty:n("p_qty") ?? 1, max_trades_per_day:n("p_maxday") ?? 2, daily_loss_limit_pct:n("p_loss")};
@@ -164,11 +181,13 @@ async function startRun() {
   $("startMsg").textContent = ""; $("startBtn").disabled = true;
   const body = {params: params()};
   if (picked) body.instrument_id = picked.id; else body.query = $("q").value;
-  if ($("m_high").value !== "" || $("m_low").value !== "") { body.prev_high = Number($("m_high").value); body.prev_low = Number($("m_low").value); }
+  const mh = $("m_high").value, ml = $("m_low").value;
+  const untouched = autoLevels && Number(mh) === autoLevels.high && Number(ml) === autoLevels.low;     // keep the automatic source
+  if ((mh !== "" || ml !== "") && !untouched) { body.prev_high = Number(mh); body.prev_low = Number(ml); }
   try {
     const {status, data} = await api("/api/runs", {method:"POST", body:JSON.stringify(body)});
     if (status === 409) { $("startMsg").textContent = data.detail + " Type them in the High and Low boxes above, then click Start again."; picked = data.instrument; $("m_high").focus(); }
-    else { $("startMsg").textContent = ""; $("m_high").value = ""; $("m_low").value = ""; refresh(); }
+    else { $("startMsg").className = "small " + (data.scheduled ? "muted" : "neg"); $("startMsg").textContent = data.scheduled ? `Market is closed now. The run is scheduled for ${data.trading_date} and starts at the open. Keep the server running.` : ""; refresh(); refreshActivity(); }
   } catch (e) { $("startMsg").textContent = e.message; }
   $("startBtn").disabled = false;
 }
@@ -245,8 +264,7 @@ async function refresh() {
     $("feedBadge").className = "badge " + (f.fatal ? "bad" : f.connected ? "ok" : "warn"); $("tokenBox").style.display = s.mode === "dhan" ? "block" : "none";
     renderRuns(s.runs); renderHist(s.history);
     $("watchT").querySelector("tbody").innerHTML = s.watch.map(w => `<tr><td>${w.instrument}</td><td class="num">${fmt(w.last_price)}</td><td class="num">${w.ticks}</td><td class="num">${fmt(w.prev_close)}</td><td class="num">${w.bad_ticks}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Nothing is being collected outside active runs.</td></tr>';
-    $("notes").innerHTML = s.notes.map(n => `${n[0]} [${n[1]}] ${n[2]}`).join("<br>") || "–";
-    if (s.writer_errors) $("notes").innerHTML += `<br><span class="neg">database writer errors: ${s.writer_errors}</span>`;
+    $("dbErr").textContent = s.writer_errors ? `Database writer errors: ${s.writer_errors} (see the server log)` : "";
   } catch (e) { if (e.message !== "login required") $("feedBadge").textContent = "dashboard offline"; }
 }
 async function refreshData() {
@@ -256,10 +274,17 @@ async function refreshData() {
     $("watchInfo").textContent = data.watchlist.length ? "Watch list: " + data.watchlist.map(w => `${w.instrument}${w.collect_live ? " [live ticks]" : ""}${w.daily_update ? " [updated daily after close]" : ""}`).join("; ") : "";
   } catch (e) {}
 }
+let actFilter = "all";
+document.addEventListener("click", e => { const f = e.target.dataset && e.target.dataset.f; if (f) { actFilter = f; document.querySelectorAll("#actFilters button").forEach(b => b.className = b.dataset.f === f ? "primary" : ""); refreshActivity(); } });
+async function refreshActivity() {
+  try { const {data} = await api("/api/activity?limit=200&source=" + actFilter);
+    $("actT").querySelector("tbody").innerHTML = data.map(r => `<tr><td>${String(r.ts).replace("T", " ").slice(0, 19)}</td><td>${r.source}</td><td class="${r.level === "error" ? "neg" : r.level === "warn" ? "warnc" : ""}">${r.message.replace(/</g, "&lt;")}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">Nothing logged yet.</td></tr>';
+  } catch (e) {}
+}
 (async function init() {
   const r = await fetch("/api/auth/status"); const a = await r.json(); authMode = a.mode;
   if (!a.authenticated) { showLogin(); return; }
-  refresh(); refreshData(); setInterval(refresh, 2000); setInterval(refreshData, 15000);
+  refresh(); refreshData(); refreshActivity(); setInterval(refresh, 2000); setInterval(refreshData, 15000); setInterval(refreshActivity, 3000);
 })();
 </script>
 </body>

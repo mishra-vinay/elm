@@ -20,8 +20,8 @@ from sqlalchemy.orm import sessionmaker
 
 from . import levels as levels_mod
 from .candles import MinuteAggregator
-from .config import IST, Settings, session_for
-from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, Watch, purge_old_ticks
+from .config import Settings, session_for
+from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, Watch, now_ist, purge_old_ticks
 from .dhan_feed import FeedNote, FeedTick
 from .history import backfill, store_live_bar
 from .risk import RiskContext, RiskEngine
@@ -37,10 +37,6 @@ class LevelsNeeded(Exception):
 
 class StartError(Exception):
     pass
-
-
-def now_ist() -> datetime:
-    return datetime.now(IST).replace(tzinfo=None)
 
 
 class Writer:
@@ -140,7 +136,7 @@ class RunManager:
     async def start(self):
         with self.factory() as s:       # runs that were live when the process died cannot be resumed
             s.execute(update(Run).where(Run.status.in_(("starting", "waiting", "running"))).values(
-                status="interrupted", ended_at=datetime.now(), ran_ok=False,
+                status="interrupted", ended_at=now_ist(), ran_ok=False,
                 error="process restarted while the run was live; ticks up to that point are stored"))
             s.commit()
         self.feed = self.feed_factory(self._on_tick, self._on_note, self._on_status)
@@ -188,6 +184,8 @@ class RunManager:
             self._prev_msg, self._cur_msg = self._cur_msg, ts
             st.last_price, st.last_tick_at = ft.ltp, ts
             st.ticks_today += 1
+            if st.ticks_today == 1:
+                self.activity("feed", "info", f"First price for {st.inst.symbol}: {ft.ltp:,.2f}")
             st.minutes_seen.add(ts.replace(second=0, microsecond=0))
             if self.s.store_ticks:
                 self._tick_buf.append(Tick(instrument_id=st.inst.id, ts=ts, ltp=ft.ltp, ltt=ft.ltt, volume=ft.volume,
@@ -222,8 +220,14 @@ class RunManager:
             self._update_run(run)
         self._handle(run, run.engine.on_tick(ts, price))
 
+    def activity(self, source: str, level: str, message: str) -> None:
+        """One place for everything worth showing in the dashboard's activity log (persisted, newest first)."""
+        self.writer.submit(lambda s: s.add(ApiLog(source=source, level=level, message=message[:500])))
+
     def _log(self, run: LiveRun, text: str, ts: datetime | None = None):
         run.log.appendleft(((ts or self.clock()).strftime("%H:%M:%S"), text))
+        level = "warn" if "NOT taken" in text else "info"
+        self.activity("run", level, f"[{run.inst.symbol}] {text}")
 
     def _describe(self, run: LiveRun, ev: Event) -> str | None:
         e, p = run.engine, ev.price
@@ -298,7 +302,7 @@ class RunManager:
                     for run in list(self.runs.values()):
                         if run.closed:
                             continue
-                        if not self.s.ignore_market_hours and (now.date() > run.trading_date or now.time() >= run.squareoff_t):
+                        if not self.s.ignore_market_hours and (now.date() > run.trading_date or (now.date() == run.trading_date and now.time() >= run.squareoff_t)):
                             self.finalize(run, "finished", "squareoff")
                         elif int(now.timestamp()) % 5 == 0:
                             self._update_run(run)
@@ -337,7 +341,7 @@ class RunManager:
         note = None if ran_ok else (run.error or "no ticks were received during the run")
         run.status = status
         self.writer.submit(lambda s: s.execute(update(Run).where(Run.id == run.id).values(
-            status=status, ended_at=datetime.now(), ticks_received=run.ticks, first_tick_at=run.first_tick,
+            status=status, ended_at=now_ist(), ticks_received=run.ticks, first_tick_at=run.first_tick,
             last_tick_at=run.last_tick, last_price=run.last_price, feed_disconnects=disconnects, ran_ok=ran_ok,
             summary=summ, error=note)))
         self._release(run)
@@ -354,26 +358,22 @@ class RunManager:
     async def start_run(self, inst: Instrument, params: Params, manual_levels: tuple[float, float] | None = None) -> dict:
         now = self.clock()
         open_t, last_entry_t, squareoff_t, close_t = session_for(inst.segment)
-        if not self.s.ignore_market_hours:
-            if now.weekday() >= 5 and inst.segment != "MCX_COMM":
-                raise StartError("Market is closed (weekend).")
-            if now.time() >= squareoff_t:
-                raise StartError(f"Today's session is over (square-off {squareoff_t:%H:%M}); start a run before then.")
+        trading_date = self.next_session_date(now, inst.segment)
         params.validate()
         with self.lock:
             if any(r.inst.id == inst.id for r in self.runs.values()):
                 raise StartError("A run is already active for this instrument.")
         if manual_levels:
-            lv = levels_mod.set_manual(self.factory, inst.id, now.date(), manual_levels[0], manual_levels[1])
+            lv = levels_mod.set_manual(self.factory, inst.id, trading_date, manual_levels[0], manual_levels[1])
         else:
             lv = await asyncio.get_running_loop().run_in_executor(
-                None, levels_mod.resolve, self.factory, inst, now.date(), self.rest)
+                None, levels_mod.resolve, self.factory, inst, trading_date, self.rest)
         if lv is None:
             raise LevelsNeeded("Previous day High/Low not found in the database or from Dhan; enter them manually.")
         try:
             engine_params = params
             with self.factory() as s:
-                run = Run(instrument_id=inst.id, status="waiting", trading_date=now.date(), params=engine_params.as_dict(),
+                run = Run(instrument_id=inst.id, status="waiting", trading_date=trading_date, params=engine_params.as_dict(),
                           prev_high=lv.high, prev_low=lv.low, levels_source=lv.source)
                 s.add(run)
                 s.commit()
@@ -386,17 +386,19 @@ class RunManager:
             return holder["risk"].approve(side, ts, price, state)
 
         engine = BreakoutPullbackEngine(lv.high, lv.low, params, approve=approve)
-        live = LiveRun(run_id, inst, params, engine, now.date(), lv, open_t, last_entry_t, squareoff_t,
+        live = LiveRun(run_id, inst, params, engine, trading_date, lv, open_t, last_entry_t, squareoff_t,
                        started_disconnects=getattr(self.feed, "disconnects", 0) or 0)
         holder["risk"] = RiskEngine(RiskContext(
             last_tick_at=lambda: self._prev_msg, now=lambda: self._cur_msg or self.clock(), last_entry_time=last_entry_t,
             session_open=open_t, stale_seconds=self.s.stale_tick_seconds, ignore_hours=self.s.ignore_market_hours,
-            log=lambda check, ok, detail: self.writer.submit(lambda s: s.add(RiskLog(run_id=run_id, check=check, approved=ok, detail=detail[:200])))))
+            log=lambda check, ok, detail: self._risk_log(run_id, inst.symbol, check, ok, detail)))
         with self.lock:
             self.runs[run_id] = live
             key = (inst.segment, inst.security_id)
             if key not in self.states:
                 self.states[key] = InstState(inst)
+        if trading_date > now.date():
+            self._log(live, f"The market is closed now. This run is scheduled for {trading_date:%A %d %b %Y} and starts watching at {open_t:%H:%M} IST. Keep the app running until then.")
         self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}{', day ' + str(lv.from_date) if lv.from_date else ''}). "
                         f"Pullback {params.pullback_pct}%, target {params.target_pct}%, stop "
                         f"{'none' if params.stop_pct is None else str(params.stop_pct) + '%'}.")
@@ -404,7 +406,26 @@ class RunManager:
         self._log(live, f"Subscribed to {inst.label}. Waiting for prices.")
         if hasattr(self.feed, "set_start_price"):       # simulated feed: start in the middle of yesterday's range
             self.feed.set_start_price(key, (lv.high + lv.low) / 2)
-        return {"id": run_id, "levels": {"high": lv.high, "low": lv.low, "source": lv.source}}
+        return {"id": run_id, "levels": {"high": lv.high, "low": lv.low, "source": lv.source},
+                "trading_date": trading_date.isoformat(), "scheduled": trading_date > now.date()}
+
+    def _risk_log(self, run_id: int, symbol: str, check: str, ok: bool, detail: str):
+        self.writer.submit(lambda s: s.add(RiskLog(run_id=run_id, check=check, approved=ok, detail=detail[:200])))
+        if not ok:
+            self.activity("risk", "warn", f"[{symbol}] entry rejected by risk check '{check}': {detail}")
+
+    def next_session_date(self, now: datetime, segment: str) -> date:
+        """The trading day a run started now belongs to: today while the session is open or still to come,
+        otherwise the next weekday (exchange holidays are not known to the app)."""
+        if self.s.ignore_market_hours:
+            return now.date()
+        sq = session_for(segment)[2]
+        d = now.date()
+        if d.weekday() >= 5 or now.time() >= sq:
+            d += timedelta(days=1)
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+        return d
 
     def stop_run(self, run_id: int) -> bool:
         with self.lock:
@@ -468,6 +489,9 @@ class RunManager:
         feed_down = not getattr(self.feed, "connected", False)
         prefix = "Feed disconnected, reconnecting. " if feed_down else ""
         hours = not self.s.ignore_market_hours
+        if hours and now.date() < r.trading_date:
+            return (f"{prefix}Scheduled for {r.trading_date:%A %d %b}: waiting for the market to open at {r.open_t:%H:%M} IST. "
+                    f"Levels are loaded: High {r.levels.high:,.2f}, Low {r.levels.low:,.2f}.")
         if r.ticks == 0:
             if hours and now.time() < r.open_t:
                 return f"{prefix}Waiting for the market to open at {r.open_t:%H:%M} IST (it is {now:%H:%M}). Levels are loaded: High {r.levels.high:,.2f}, Low {r.levels.low:,.2f}."
@@ -521,7 +545,7 @@ class RunManager:
                     "position": None if pos is None else {"side": pos.side, "entry": pos.entry_price, "target": pos.target,
                                                           "stop": pos.stop, "unrealised_pct": unreal},
                     "summary": e.summary(), "events": list(r.events), "prices": list(r.recent)[-300:],
-                    "status_text": self._status_text(r, now), "log": list(r.log)[:40],
+                    "status_text": self._status_text(r, now), "log": list(r.log)[:40], "trading_date": r.trading_date.isoformat(),
                     "params": r.params.as_dict(), "squareoff": r.squareoff_t.strftime("%H:%M")})
             watch = [{"instrument": st.inst.label, "last_price": st.last_price, "ticks": st.ticks_today,
                       "prev_close": st.prev_close, "bad_ticks": st.bad_ticks} for st in self.states.values()
