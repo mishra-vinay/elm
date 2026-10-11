@@ -1,3 +1,11 @@
 strategy_lab/.cache/
 __pycache__/
 *.pyc
+
+# trading_dryrun
+.env
+trading_dryrun/data/
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/

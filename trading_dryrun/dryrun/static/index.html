@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dry-run trading</title>
+<style>
+  :root { --bg:#f6f6f4; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#8a8984; --line:#e2e1dc;
+          --blue:#2a78d6; --orange:#eb6834; --green:#0b8a4f; --red:#d13a39; --amber:#b87800; --chip:#efeeea; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121211; --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7;
+          --muted:#8f8e86; --line:#2f2f2c; --blue:#3987e5; --orange:#d95926; --green:#2fbf7a; --red:#e66767; --amber:#e0a030; --chip:#262624; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; background:var(--surface); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0 8px 0 0; }
+  .badge { padding:2px 8px; border-radius:10px; background:var(--chip); color:var(--ink2); font-size:12px; }
+  .badge.warn { background:var(--amber); color:#fff; } .badge.ok { background:var(--green); color:#fff; } .badge.bad { background:var(--red); color:#fff; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  h2 { font-size:14px; margin:0 0 10px; } .muted { color:var(--muted); } .small { font-size:12px; }
+  label { display:block; font-size:12px; color:var(--ink2); margin-bottom:2px; }
+  input, select, button { font:inherit; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  input { width:100%; } button { cursor:pointer; } button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  button.danger { color:var(--red); border-color:var(--red); } button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); font-size:13px; white-space:nowrap; }
+  th { color:var(--ink2); font-weight:600; } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  .run { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+  .run h3 { margin:0; font-size:15px; } .kv { display:flex; flex-wrap:wrap; gap:6px 18px; margin:6px 0; } .kv b { font-variant-numeric:tabular-nums; }
+  canvas { width:100%; height:150px; display:block; background:var(--bg); border-radius:6px; }
+  .tbl { overflow-x:auto; } #loginBox { display:none; max-width:360px; margin:60px auto; }
+  .help { background:var(--chip); border-radius:6px; padding:8px 10px; color:var(--ink2); font-size:12px; margin-top:8px; }
+  ul.events { list-style:none; padding:0; margin:6px 0 0; font-size:12px; max-height:110px; overflow:auto; }
+  ul.events li { padding:2px 0; border-bottom:1px dashed var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dry-run trading</h1>
+  <span class="badge" id="modeBadge">…</span>
+  <span class="badge ok">DRY RUN · no orders are ever sent</span>
+  <span class="badge" id="feedBadge">feed …</span>
+  <span class="muted small" id="clock"></span>
+  <span style="flex:1"></span>
+  <a class="small" href="/api/export/trades.csv">Download trades (CSV)</a>
+</header>
+
+<div id="loginBox"><section>
+  <h2>Login</h2>
+  <div id="pwForm"><label>Password</label><input type="password" id="pw"><p><button class="primary" onclick="login()">Log in</button></p></div>
+  <div id="otpForm" style="display:none"><label>E-mail</label><input id="otpEmail" type="email">
+    <p><button onclick="otpRequest()">Send code</button></p><label>6-digit code</label><input id="otpCode" inputmode="numeric">
+    <p><button class="primary" onclick="otpVerify()">Verify</button></p></div>
+  <div class="small neg" id="loginMsg"></div>
+</section></div>
+
+<main id="app">
+  <section>
+    <h2>1. Start a dry run</h2>
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:2;min-width:260px"><label>Stock, index or futures contract: name, symbol, security id or SEGMENT:ID (e.g. NSE_FNO:48704)</label>
+        <input id="q" list="hits" autocomplete="off" placeholder="e.g. Nifty 50, BAJFINANCE, SILVERM, IDX_I:13"></div>
+      <datalist id="hits"></datalist>
+      <button class="primary" id="startBtn" onclick="startRun()">Start dry run</button>
+    </div>
+    <div id="picked" class="small muted" style="margin:6px 0"></div>
+    <div class="grid">
+      <div><label>Pullback % (entry after break)</label><input id="p_pullback" type="number" step="0.05" value="1.0"></div>
+      <div><label>Profit target %</label><input id="p_target" type="number" step="0.1" value="2.0"></div>
+      <div><label>Stop-loss % (empty = none)</label><input id="p_stop" type="number" step="0.1" value="1.0"></div>
+      <div><label>Quantity (units)</label><input id="p_qty" type="number" step="1" value="1"></div>
+      <div><label>Max trades / day</label><input id="p_maxday" type="number" step="1" value="2"></div>
+      <div><label>Daily loss limit % (empty = none)</label><input id="p_loss" type="number" step="0.1" value="2.0"></div>
+    </div>
+    <div id="manualBox" style="display:none;margin-top:10px" class="grid">
+      <div><label>Previous day High</label><input id="m_high" type="number" step="any"></div>
+      <div><label>Previous day Low</label><input id="m_low" type="number" step="any"></div>
+    </div>
+    <div class="help">Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API.
+      If neither has them you will be asked to type them in. The rule is the one backtested on silver and Bajaj Finance, which showed
+      <b>no edge</b> there; this dry run is for collecting your own evidence. Defaults are the tested values, not recommendations.</div>
+    <div class="small neg" id="startMsg" style="margin-top:6px"></div>
+  </section>
+
+  <section><h2>2. Active runs</h2><div id="runs"><span class="muted">No active runs.</span></div></section>
+
+  <section><h2>3. Finished runs</h2>
+    <div class="tbl"><table id="hist"><thead><tr><th>#</th><th>Date</th><th>Instrument</th><th>Status</th><th>Ran OK</th><th class="num">Ticks</th>
+      <th class="num">Trades</th><th class="num">Win %</th><th class="num">Net P&amp;L</th><th class="num">Coverage</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div id="detail" style="margin-top:12px"></div>
+  </section>
+
+  <section>
+    <h2>4. Market data collection</h2>
+    <div class="row"><input id="dq" list="hits2" style="max-width:340px" placeholder="instrument to collect"><datalist id="hits2"></datalist>
+      <button onclick="watch(true)">Collect live ticks</button>
+      <button onclick="watch(false)">Stop collecting</button>
+      <select id="bf_int"><option value="1">1-min</option><option value="5">5-min</option><option value="15">15-min</option><option value="60">60-min</option></select>
+      <input id="bf_days" type="number" value="365" style="width:90px" title="intraday days (max ~1825)">
+      <button onclick="backfill()">Download history</button>
+      <button onclick="refreshMaster()">Reload instrument list</button></div>
+    <div class="small muted" id="dataMsg" style="margin-top:6px"></div>
+    <div class="tbl"><table id="watchT"><thead><tr><th>Collecting</th><th class="num">Last</th><th class="num">Ticks</th><th class="num">Prev close</th><th class="num">Bad ticks</th></tr></thead><tbody></tbody></table></div>
+    <div class="tbl" style="margin-top:8px"><table id="dataT"><thead><tr><th>Stored candles</th><th>Interval</th><th class="num">Rows</th><th>From</th><th>To</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="tokenBox" style="display:none"><h2>Dhan access token</h2>
+    <div class="row"><input id="tok" type="password" placeholder="paste a new 24-hour token (kept in memory only)" style="max-width:520px">
+    <button onclick="setToken()">Update token</button></div><div class="small muted" id="tokMsg"></div></section>
+
+  <section><h2>Feed log</h2><div id="notes" class="small muted"></div></section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (x, d=2) => x == null ? "–" : Number(x).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
+const cls = x => x == null ? "" : x > 0 ? "pos" : x < 0 ? "neg" : "";
+let picked = null, authMode = "none", detailId = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
+  if (r.status === 401) { showLogin(); throw new Error("login required"); }
+  const text = await r.text(); let data = null; try { data = JSON.parse(text); } catch (e) {}
+  if (!r.ok && r.status !== 409) throw new Error((data && (data.detail || data.message)) || text);
+  return {status: r.status, data};
+}
+function showLogin() {
+  $("app").style.display = "none"; $("loginBox").style.display = "block";
+  $("pwForm").style.display = authMode === "password" ? "block" : "none"; $("otpForm").style.display = authMode === "email_otp" ? "block" : "none";
+}
+async function login() { try { await api("/api/auth/login", {method:"POST", body:JSON.stringify({password:$("pw").value})}); location.reload(); } catch (e) { $("loginMsg").textContent = e.message; } }
+async function otpRequest() { try { await api("/api/auth/otp/request", {method:"POST", body:JSON.stringify({email:$("otpEmail").value})}); $("loginMsg").textContent = "If that address is allowed, a code was sent."; } catch (e) { $("loginMsg").textContent = e.message; } }
+async function otpVerify() { try { await api("/api/auth/otp/verify", {method:"POST", body:JSON.stringify({email:$("otpEmail").value, code:$("otpCode").value})}); location.reload(); } catch (e) { $("loginMsg").textContent = e.message; } }
+
+let searchTimer;
+function wireSearch(inputId, listId, onPick) {
+  $(inputId).addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      const q = $(inputId).value; if (q.length < 2) return;
+      try { const {data} = await api("/api/instruments/search?q=" + encodeURIComponent(q));
+        $(listId).innerHTML = data.map(i => `<option value="${i.label}"></option>`).join("");
+        const hit = data.find(i => i.label === q); onPick(hit || (data.length === 1 ? data[0] : null), data); } catch (e) {}
+    }, 250);
+  });
+}
+wireSearch("q", "hits", (hit, all) => { picked = hit; $("picked").textContent = hit ? `Selected: ${hit.label} · ${hit.instrument}${hit.expiry ? " · expires " + hit.expiry : ""} · lot ${hit.lot_size}` : (all.length ? `${all.length} matches, pick one from the list` : "no match"); });
+let dpicked = null;
+wireSearch("dq", "hits2", hit => { dpicked = hit; });
+
+function params() {
+  const n = id => $(id).value === "" ? null : Number($(id).value);
+  return {pullback_pct:n("p_pullback") ?? 0, target_pct:n("p_target"), stop_pct:n("p_stop"), qty:n("p_qty") ?? 1, max_trades_per_day:n("p_maxday") ?? 2, daily_loss_limit_pct:n("p_loss")};
+}
+async function startRun() {
+  $("startMsg").textContent = ""; $("startBtn").disabled = true;
+  const body = {params: params()};
+  if (picked) body.instrument_id = picked.id; else body.query = $("q").value;
+  if ($("manualBox").style.display !== "none") { body.prev_high = Number($("m_high").value); body.prev_low = Number($("m_low").value); }
+  try {
+    const {status, data} = await api("/api/runs", {method:"POST", body:JSON.stringify(body)});
+    if (status === 409) { $("manualBox").style.display = "grid"; $("startMsg").textContent = data.detail; picked = data.instrument; }
+    else { $("manualBox").style.display = "none"; $("startMsg").textContent = ""; refresh(); }
+  } catch (e) { $("startMsg").textContent = e.message; }
+  $("startBtn").disabled = false;
+}
+async function stopRun(id) { await api(`/api/runs/${id}/stop`, {method:"POST"}); refresh(); }
+async function watch(on) { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; } await api("/api/watch", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, on})}); refresh(); }
+async function backfill() { if (!dpicked) { $("dataMsg").textContent = "pick an instrument from the list first"; return; }
+  try { await api("/api/backfill", {method:"POST", body:JSON.stringify({instrument_id:dpicked.id, intraday_days:Number($("bf_days").value), interval:Number($("bf_int").value)})}); $("dataMsg").textContent = "download started"; } catch (e) { $("dataMsg").textContent = e.message; } }
+async function refreshMaster() { await api("/api/instruments/refresh", {method:"POST"}); $("dataMsg").textContent = "instrument list is reloading in the background"; }
+async function setToken() { try { await api("/api/feed/token", {method:"POST", body:JSON.stringify({token:$("tok").value})}); $("tok").value = ""; $("tokMsg").textContent = "token updated, feed reconnecting"; } catch (e) { $("tokMsg").textContent = e.message; } }
+
+function chart(canvas, r) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr; const g = canvas.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  const prices = r.prices.map(p => p[1]);
+  const lines = [[r.high, "prev High", col("--blue")], [r.buy_trigger, "buy trigger", col("--green")], [r.sell_trigger, "sell trigger", col("--red")], [r.low, "prev Low", col("--orange")]];
+  const all = prices.concat(lines.map(l => l[0]));
+  if (r.position) { all.push(r.position.target); if (r.position.stop) all.push(r.position.stop); }
+  let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const y = v => h - 14 - (v - lo) / (hi - lo) * (h - 24);
+  g.font = "11px system-ui"; g.lineWidth = 1;
+  const RM = 128, labels = [];
+  const hline = (v, name, c, dash) => { g.strokeStyle = c; g.setLineDash(dash); g.beginPath(); g.moveTo(0, y(v)); g.lineTo(w - RM + 4, y(v)); g.stroke(); g.setLineDash([]); labels.push({y: y(v), text: `${name} ${fmt(v)}`, c}); };
+  lines.forEach(([v, name, c]) => hline(v, name, c, [5, 4]));
+  if (r.position) [[r.position.target, "target"], [r.position.stop, "stop"]].forEach(([v, n]) => { if (v) hline(v, n, col("--muted"), [2, 3]); });
+  labels.sort((a, b) => a.y - b.y);                                   // push labels apart so close levels stay readable
+  for (let i = 1; i < labels.length; i++) if (labels[i].y - labels[i - 1].y < 12) labels[i].y = labels[i - 1].y + 12;
+  labels.forEach(l => { g.fillStyle = col("--ink2"); g.fillText(l.text, w - RM + 8, l.y + 3); });
+  if (prices.length > 1) { g.strokeStyle = col("--ink"); g.lineWidth = 1.6; g.beginPath(); prices.forEach((p, i) => { const x = i / (prices.length - 1) * (w - RM); i ? g.lineTo(x, y(p)) : g.moveTo(x, y(p)); }); g.stroke(); }
+  else { g.fillStyle = col("--muted"); g.fillText("waiting for ticks…", 10, h / 2); }
+}
+
+function renderRuns(runs) {
+  const el = $("runs");
+  if (!runs.length) { el.innerHTML = '<span class="muted">No active runs.</span>'; return; }
+  el.innerHTML = runs.map(r => {
+    const s = r.summary, pos = r.position;
+    return `<div class="run" id="run${r.id}"><div class="row"><h3>${r.instrument}</h3><span class="badge ${r.status === "running" ? "ok" : "warn"}">${r.status}</span>
+      <span class="small muted">levels from ${r.levels_source} · square-off ${r.squareoff}</span><span style="flex:1"></span><button class="danger" onclick="stopRun(${r.id})">Stop &amp; square off</button></div>
+      <div class="kv"><span>Last <b>${fmt(r.last_price)}</b></span><span>Ticks <b>${r.ticks}</b></span><span>Last tick <b>${r.last_tick_age == null ? "–" : r.last_tick_age + "s ago"}</b></span>
+        <span>Broke High <b>${r.armed_buy ? "yes, waiting for pullback" : "–"}</b></span><span>Broke Low <b>${r.armed_sell ? "yes, waiting for pullback" : "–"}</b></span></div>
+      <div class="kv">${pos ? `<span>Open <b>${pos.side}</b> @ <b>${fmt(pos.entry)}</b></span><span>Target <b>${fmt(pos.target)}</b></span><span>Stop <b>${pos.stop ? fmt(pos.stop) : "none"}</b></span><span class="${cls(pos.unrealised_pct)}">Unrealised <b>${fmt(pos.unrealised_pct)}%</b></span>` : '<span class="muted">No open position</span>'}
+        <span>Trades <b>${s.trades}</b></span><span>Wins <b>${s.wins}</b></span><span class="${cls(s.net_pnl)}">Net P&amp;L <b>₹${fmt(s.net_pnl)}</b></span></div>
+      <canvas id="c${r.id}"></canvas>
+      <ul class="events">${r.events.slice(0, 12).map(e => `<li><b>${e.ts}</b> ${e.kind.replace("_", " ")} ${e.side} @ ${fmt(e.price)} ${e.reason ? "· " + e.reason : ""}</li>`).join("") || '<li class="muted">No signals yet</li>'}</ul></div>`;
+  }).join("");
+  runs.forEach(r => chart($("c" + r.id), r));
+}
+function renderHist(h) {
+  $("hist").querySelector("tbody").innerHTML = h.map(r => `<tr><td>${r.id}</td><td>${r.date}</td><td>${r.instrument}</td><td>${r.status}</td>
+    <td>${r.ran_ok == null ? "–" : r.ran_ok ? '<span class="pos">yes</span>' : '<span class="neg" title="' + (r.error || "") + '">no</span>'}</td><td class="num">${r.ticks ?? 0}</td><td class="num">${r.trades ?? "–"}</td>
+    <td class="num">${r.win_rate == null ? "–" : fmt(r.win_rate * 100, 0)}</td><td class="num ${cls(r.net_pnl)}">${r.net_pnl == null ? "–" : "₹" + fmt(r.net_pnl)}</td>
+    <td class="num">${r.coverage == null ? "–" : fmt(r.coverage * 100, 0) + "%"}</td><td><button onclick="showDetail(${r.id})">Details</button></td></tr>`).join("") || '<tr><td colspan="11" class="muted">Nothing yet.</td></tr>';
+}
+async function showDetail(id) {
+  detailId = id; const {data: d} = await api("/api/runs/" + id);
+  const sm = d.summary || {};
+  $("detail").innerHTML = `<h2>Run ${d.id}: ${d.instrument} · ${d.date}</h2><div class="small muted">Previous High ${fmt(d.high)} · Low ${fmt(d.low)} (${d.levels_source}) · ticks ${d.ticks} · data coverage ${sm.data_coverage == null ? "–" : fmt(sm.data_coverage * 100, 0) + "%"} · feed disconnects ${sm.feed_disconnects ?? "–"} · ${d.error ? "<span class='neg'>" + d.error + "</span>" : "no errors"}</div>
+    <div class="tbl"><table><thead><tr><th>Signal time</th><th>Kind</th><th>Side</th><th class="num">Price</th><th class="num">Level</th><th>Action</th><th>Reason</th></tr></thead><tbody>${d.signals.map(s => `<tr><td>${String(s.ts).replace("T", " ")}</td><td>${s.kind}</td><td>${s.side}</td><td class="num">${fmt(s.price)}</td><td class="num">${fmt(s.level)}</td><td>${s.action}</td><td>${s.reason || ""}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No signals</td></tr>'}</tbody></table></div>
+    <div class="tbl" style="margin-top:8px"><table><thead><tr><th>Side</th><th class="num">Entry</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Cost</th><th class="num">Net</th><th class="num">Net %</th></tr></thead><tbody>${d.trades.map(t => `<tr><td>${t.side}</td><td class="num">${fmt(t.entry_price)}</td><td class="num">${fmt(t.target)}</td><td class="num">${t.stop ? fmt(t.stop) : "–"}</td><td class="num">${fmt(t.exit_price)}</td><td>${t.exit_reason || "open"}</td><td class="num">${fmt(t.gross_pnl)}</td><td class="num">${fmt(t.cost)}</td><td class="num ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</td><td class="num ${cls(t.net_pct)}">${fmt(t.net_pct)}</td></tr>`).join("") || '<tr><td colspan="10" class="muted">No trades</td></tr>'}</tbody></table></div>`;
+}
+async function refresh() {
+  try {
+    const {data: s} = await api("/api/state");
+    $("clock").textContent = s.now + " IST"; $("modeBadge").textContent = s.mode === "sim" ? "SIMULATED FEED" : "Dhan live data";
+    $("modeBadge").className = "badge " + (s.mode === "sim" ? "warn" : "ok");
+    const f = s.feed; $("feedBadge").textContent = f.fatal ? "feed error" : f.connected ? `feed connected · ${f.subscribed} subscribed` + (f.last_message_age != null ? ` · ${f.last_message_age}s` : "") : "feed disconnected";
+    $("feedBadge").className = "badge " + (f.fatal ? "bad" : f.connected ? "ok" : "warn"); $("tokenBox").style.display = s.mode === "dhan" ? "block" : "none";
+    renderRuns(s.runs); renderHist(s.history);
+    $("watchT").querySelector("tbody").innerHTML = s.watch.map(w => `<tr><td>${w.instrument}</td><td class="num">${fmt(w.last_price)}</td><td class="num">${w.ticks}</td><td class="num">${fmt(w.prev_close)}</td><td class="num">${w.bad_ticks}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">Nothing is being collected outside active runs.</td></tr>';
+    $("notes").innerHTML = s.notes.map(n => `${n[0]} [${n[1]}] ${n[2]}`).join("<br>") || "–";
+    if (s.writer_errors) $("notes").innerHTML += `<br><span class="neg">database writer errors: ${s.writer_errors}</span>`;
+  } catch (e) { if (e.message !== "login required") $("feedBadge").textContent = "dashboard offline"; }
+}
+async function refreshData() {
+  try { const {data} = await api("/api/data/summary");
+    $("dataT").querySelector("tbody").innerHTML = data.candles.map(c => `<tr><td>${c.symbol} (${c.segment})</td><td>${c.interval}</td><td class="num">${c.count.toLocaleString()}</td><td>${String(c.from).slice(0, 16)}</td><td>${String(c.to).slice(0, 16)}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">No candles stored yet. Stored ticks: ${data.ticks.toLocaleString()}</td></tr>`;
+    if (data.jobs.length) $("dataMsg").textContent = data.jobs.map(j => `${j.instrument}: ${j.status} – ${j.message}`).join(" | ");
+  } catch (e) {}
+}
+(async function init() {
+  const r = await fetch("/api/auth/status"); const a = await r.json(); authMode = a.mode;
+  if (!a.authenticated) { showLogin(); return; }
+  refresh(); refreshData(); setInterval(refresh, 2000); setInterval(refreshData, 15000);
+})();
+</script>
+</body>
+</html>

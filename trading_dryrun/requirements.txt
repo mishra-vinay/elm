@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+websockets>=12
+sqlalchemy>=2.0
+requests>=2.31
+# PostgreSQL later (set DATABASE_URL=postgresql+psycopg://user:pass@host/db):
+# psycopg[binary]>=3.1
