@@ -131,3 +131,28 @@ def test_replay_range_uses_previous_day_levels():
                 candle(d2 + timedelta(minutes=2), 99.0, 101.5, 99.0, 101.4)]
     r = replay_range(candles, Params(slippage_pct=0, cost_pct=0))
     assert r["sessions"] == 1 and r["trades"] == 1 and r["wins"] == 1
+
+
+def test_search_accepts_the_dropdown_label_and_status_text_explains_what_is_happening(tmp_path):
+    app = make_app(tmp_path, BUY_PATH)
+    with TestClient(app) as c:
+        hit = c.get("/api/instruments/search", params={"q": "Bajaj Finance [NSE_EQ:317]"}).json()
+        assert len(hit) == 1 and hit[0]["security_id"] == "317"          # exactly what the dropdown puts in the box
+        r = c.post("/api/runs", json={"instrument_id": hit[0]["id"], "prev_high": 100, "prev_low": 95,
+                                       "params": {"slippage_pct": 0, "cost_pct": 0}})
+        assert r.status_code == 200, r.text
+        wait_for(lambda: c.get("/api/state").json()["runs"][0]["summary"]["trades"] == 1)
+        run = c.get("/api/state").json()["runs"][0]
+        text = "\n".join(t for _ts, t in run["log"])
+        assert "Run started. Previous-day High 100.00, Low 95.00 (source: manual)" in text
+        assert "broke above the previous High" in text and "SIMULATED BUY entered at 99.00" in text and "SIMULATED exit (target)" in text
+        assert "yesterday's range" in run["status_text"] and "95.00 to 100.00" in run["status_text"]
+
+
+def test_status_text_before_any_price_arrives(tmp_path):
+    app = make_app(tmp_path, [])
+    with TestClient(app) as c:
+        assert c.post("/api/runs", json={"query": "NIFTY 50", "prev_high": 100, "prev_low": 95}).status_code == 200
+        run = c.get("/api/state").json()["runs"][0]
+        assert "no price has arrived yet" in run["status_text"]
+        assert any("Subscribed to Nifty 50" in t for _ts, t in run["log"])

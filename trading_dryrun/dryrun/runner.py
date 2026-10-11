@@ -114,6 +114,7 @@ class LiveRun:
     pending_signal: dict | None = None
     error: str | None = None
     closed: bool = False
+    log: deque = field(default_factory=lambda: deque(maxlen=200))          # human timeline: (time, text)
 
 
 class RunManager:
@@ -210,11 +211,38 @@ class RunManager:
             return
         if run.status == "waiting":
             run.status = "running"
+            self._log(run, f"First price received ({price:,.2f}). Strategy is now watching the market.", ts)
             self._update_run(run)
         self._handle(run, run.engine.on_tick(ts, price))
 
+    def _log(self, run: LiveRun, text: str, ts: datetime | None = None):
+        run.log.appendleft(((ts or self.clock()).strftime("%H:%M:%S"), text))
+
+    def _describe(self, run: LiveRun, ev: Event) -> str | None:
+        e, p = run.engine, ev.price
+        if ev.kind == "break":
+            up = ev.side == "BUY"
+            return (f"Price {p:,.2f} broke {'above the previous High' if up else 'below the previous Low'} "
+                    f"({run.levels.high if up else run.levels.low:,.2f}). Waiting for a pullback to "
+                    f"{'<= ' + format(e.buy_entry_level, ',.2f') if up else '>= ' + format(e.sell_entry_level, ',.2f')} to take a {ev.side}.")
+        if ev.kind == "entry_signal":
+            return f"Pullback reached at {p:,.2f}: {ev.side} signal."
+        if ev.kind == "entry_skipped":
+            return f"{ev.side} signal NOT taken: {ev.reason}."
+        if ev.kind == "entry":
+            t = ev.trade
+            return (f"SIMULATED {ev.side} entered at {t['entry_price']:,.2f} (target {t['target']:,.2f}, "
+                    f"stop {'none' if t['stop'] is None else format(t['stop'], ',.2f')}).")
+        if ev.kind == "exit":
+            t = ev.trade
+            return f"SIMULATED exit ({ev.reason}) at {t['exit_price']:,.2f}: net Rs {t['net_pnl']:,.2f} ({t['net_pct']:+.2f}%)."
+        return None
+
     def _handle(self, run: LiveRun, events: list[Event]):
         for ev in events:
+            text = self._describe(run, ev)
+            if text:
+                self._log(run, text, ev.ts)
             run.events.appendleft({"ts": ev.ts.strftime("%H:%M:%S"), "kind": ev.kind, "side": ev.side,
                                    "price": round(ev.price, 4), "reason": ev.reason})
             if ev.kind == "break":
@@ -277,6 +305,7 @@ class RunManager:
         if run.closed:
             return
         run.closed = True
+        self._log(run, f"Run {status} ({reason}). Saving results.")
         self._flush_ticks()
         now = self.clock()
         self._handle(run, run.engine.square_off(now, run.last_price, reason))
@@ -357,7 +386,11 @@ class RunManager:
             key = (inst.segment, inst.security_id)
             if key not in self.states:
                 self.states[key] = InstState(inst)
+        self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}). "
+                        f"Pullback {params.pullback_pct}%, target {params.target_pct}%, stop "
+                        f"{'none' if params.stop_pct is None else str(params.stop_pct) + '%'}.")
         await self.feed.subscribe([key])
+        self._log(live, f"Subscribed to {inst.label}. Waiting for prices.")
         if hasattr(self.feed, "set_start_price"):       # simulated feed: start in the middle of yesterday's range
             self.feed.set_start_price(key, (lv.high + lv.low) / 2)
         return {"id": run_id, "levels": {"high": lv.high, "low": lv.low, "source": lv.source}}
@@ -385,6 +418,42 @@ class RunManager:
         if on:
             await self.feed.subscribe([key])
 
+    def _status_text(self, r: LiveRun, now: datetime) -> str:
+        e, p = r.engine, r.last_price
+        feed_down = not getattr(self.feed, "connected", False)
+        prefix = "Feed disconnected, reconnecting. " if feed_down else ""
+        hours = not self.s.ignore_market_hours
+        if r.ticks == 0:
+            if hours and now.time() < r.open_t:
+                return f"{prefix}Waiting for the market to open at {r.open_t:%H:%M} IST (it is {now:%H:%M}). Levels are loaded: High {r.levels.high:,.2f}, Low {r.levels.low:,.2f}."
+            return (f"{prefix}Subscribed, but no price has arrived yet. If the market is open, check the feed badge above "
+                    "and that this instrument trades today.")
+        if e.position is not None:
+            pos = e.position
+            sign = 1 if pos.side == "BUY" else -1
+            u = sign * (p - pos.entry_price) / pos.entry_price * 100 if p else 0
+            return (f"{prefix}SIMULATED {pos.side} open since {pos.entry_ts:%H:%M:%S} at {pos.entry_price:,.2f}. "
+                    f"Now {p:,.2f} ({u:+.2f}%). Exits at target {pos.target:,.2f}"
+                    f"{'' if pos.stop is None else f' or stop {pos.stop:,.2f}'}, or square-off at {r.squareoff_t:%H:%M}.")
+        if hours and now.time() >= r.last_entry_t:
+            return f"{prefix}No new entries after {r.last_entry_t:%H:%M}. Square-off at {r.squareoff_t:%H:%M}."
+        done = sum(e.trades_by_side.values())
+        if done >= r.params.max_trades_per_day:
+            return f"{prefix}Max trades per day reached ({done}). No new entries; waiting for square-off."
+        if r.params.daily_loss_limit_pct is not None and e.net_pct_sum <= -r.params.daily_loss_limit_pct:
+            return f"{prefix}Daily loss limit reached. No new entries."
+        notes = []
+        if e.armed["BUY"]:
+            notes.append(f"Price broke above the previous High ({r.levels.high:,.2f}); waiting for a pullback to {e.buy_entry_level:,.2f} or lower to BUY (now {p:,.2f}).")
+        if e.armed["SELL"]:
+            notes.append(f"Price broke below the previous Low ({r.levels.low:,.2f}); waiting for a pullback to {e.sell_entry_level:,.2f} or higher to SELL (now {p:,.2f}).")
+        if notes:
+            return prefix + " ".join(notes)
+        up_pct, dn_pct = (e.break_up_level / p - 1) * 100, (1 - e.break_down_level / p) * 100
+        where = "inside" if r.levels.low <= p <= r.levels.high else "outside"
+        return (f"{prefix}Price {p:,.2f} is {where} yesterday's range ({r.levels.low:,.2f} to {r.levels.high:,.2f}). "
+                f"A setup starts if it trades above {e.break_up_level:,.2f} ({up_pct:+.2f}%) or below {e.break_down_level:,.2f} ({-dn_pct:+.2f}%).")
+
     def snapshot(self) -> dict:
         now = self.clock()
         with self.lock:
@@ -407,6 +476,7 @@ class RunManager:
                     "position": None if pos is None else {"side": pos.side, "entry": pos.entry_price, "target": pos.target,
                                                           "stop": pos.stop, "unrealised_pct": unreal},
                     "summary": e.summary(), "events": list(r.events), "prices": list(r.recent)[-300:],
+                    "status_text": self._status_text(r, now), "log": list(r.log)[:40],
                     "params": r.params.as_dict(), "squareoff": r.squareoff_t.strftime("%H:%M")})
             watch = [{"instrument": st.inst.label, "last_price": st.last_price, "ticks": st.ticks_today,
                       "prev_close": st.prev_close, "bad_ticks": st.bad_ticks} for st in self.states.values()

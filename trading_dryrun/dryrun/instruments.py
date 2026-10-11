@@ -23,6 +23,7 @@ SEGMENT_MAP = {("NSE", "I"): "IDX_I", ("BSE", "I"): "IDX_I", ("NSE", "E"): "NSE_
                ("NSE", "C"): "NSE_CURRENCY", ("BSE", "C"): "BSE_CURRENCY"}
 KEEP_INSTRUMENTS = {"INDEX", "EQUITY", "FUTIDX", "FUTSTK", "FUTCOM"}
 DIRECT = re.compile(r"^\s*([A-Za-z_]+)\s*[:/ ]\s*(\d+)\s*$")
+LABEL = re.compile(r"\[([A-Za-z_]+):(\d+)\]\s*$")      # the dropdown label: "Bajaj Finance [NSE_EQ:317]"
 
 # Used only until the master is downloaded. Security ids come from Dhan's master; verify them after loading it.
 SEED = [("IDX_I", "13", "INDEX", "NIFTY", "Nifty 50"), ("IDX_I", "25", "INDEX", "BANKNIFTY", "Nifty Bank"),
@@ -103,7 +104,7 @@ def search(factory: sessionmaker, q: str, limit: int = 20) -> list[Instrument]:
     if not q:
         return []
     with factory() as s:
-        m = DIRECT.match(q)
+        m = DIRECT.match(q) or LABEL.search(q)
         if m and m.group(1).upper() in {v for v in SEGMENT_MAP.values()}:
             hit = s.scalar(select(Instrument).where(Instrument.segment == m.group(1).upper(),
                                                     Instrument.security_id == m.group(2)))

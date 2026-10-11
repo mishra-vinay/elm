@@ -32,7 +32,8 @@
   canvas { width:100%; height:150px; display:block; background:var(--bg); border-radius:6px; }
   .tbl { overflow-x:auto; } #loginBox { display:none; max-width:360px; margin:60px auto; }
   .help { background:var(--chip); border-radius:6px; padding:8px 10px; color:var(--ink2); font-size:12px; margin-top:8px; }
-  ul.events { list-style:none; padding:0; margin:6px 0 0; font-size:12px; max-height:110px; overflow:auto; }
+  .now { background:var(--chip); border-radius:6px; padding:8px 10px; margin:8px 0; }
+  ul.events { list-style:none; padding:0; margin:6px 0 0; font-size:12px; max-height:190px; overflow:auto; }
   ul.events li { padding:2px 0; border-bottom:1px dashed var(--line); }
 </style>
 </head>
@@ -74,9 +75,10 @@
       <div><label>Max trades / day</label><input id="p_maxday" type="number" step="1" value="2"></div>
       <div><label>Daily loss limit % (empty = none)</label><input id="p_loss" type="number" step="0.1" value="2.0"></div>
     </div>
-    <div id="manualBox" style="display:none;margin-top:10px" class="grid">
-      <div><label>Previous day High</label><input id="m_high" type="number" step="any"></div>
-      <div><label>Previous day Low</label><input id="m_low" type="number" step="any"></div>
+    <div id="manualBox" style="margin-top:10px" class="grid">
+      <div><label>Previous day High (optional)</label><input id="m_high" type="number" step="any" placeholder="empty = automatic"></div>
+      <div><label>Previous day Low (optional)</label><input id="m_low" type="number" step="any" placeholder="empty = automatic"></div>
+      <div class="small muted" style="grid-column:span 2;align-self:end">Leave both empty to use the database or Dhan's daily candle. Fill both to override.</div>
     </div>
     <div class="help">Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API.
       If neither has them you will be asked to type them in. The rule is the one backtested on silver and Bajaj Finance, which showed
@@ -117,7 +119,7 @@
 const $ = id => document.getElementById(id);
 const fmt = (x, d=2) => x == null ? "–" : Number(x).toLocaleString("en-IN", {minimumFractionDigits:d, maximumFractionDigits:d});
 const cls = x => x == null ? "" : x > 0 ? "pos" : x < 0 ? "neg" : "";
-let picked = null, authMode = "none", detailId = null;
+let picked = null, authMode = "none", detailId = null; const known = {};
 
 async function api(path, opts) {
   const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
@@ -140,7 +142,9 @@ function wireSearch(inputId, listId, onPick) {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       const q = $(inputId).value; if (q.length < 2) return;
+      if (known[q]) { onPick(known[q], [known[q]]); return; }                  // a label chosen from the dropdown
       try { const {data} = await api("/api/instruments/search?q=" + encodeURIComponent(q));
+        data.forEach(i => known[i.label] = i);
         $(listId).innerHTML = data.map(i => `<option value="${i.label}"></option>`).join("");
         const hit = data.find(i => i.label === q); onPick(hit || (data.length === 1 ? data[0] : null), data); } catch (e) {}
     }, 250);
@@ -158,11 +162,11 @@ async function startRun() {
   $("startMsg").textContent = ""; $("startBtn").disabled = true;
   const body = {params: params()};
   if (picked) body.instrument_id = picked.id; else body.query = $("q").value;
-  if ($("manualBox").style.display !== "none") { body.prev_high = Number($("m_high").value); body.prev_low = Number($("m_low").value); }
+  if ($("m_high").value !== "" || $("m_low").value !== "") { body.prev_high = Number($("m_high").value); body.prev_low = Number($("m_low").value); }
   try {
     const {status, data} = await api("/api/runs", {method:"POST", body:JSON.stringify(body)});
-    if (status === 409) { $("manualBox").style.display = "grid"; $("startMsg").textContent = data.detail; picked = data.instrument; }
-    else { $("manualBox").style.display = "none"; $("startMsg").textContent = ""; refresh(); }
+    if (status === 409) { $("startMsg").textContent = data.detail + " Type them in the High and Low boxes above, then click Start again."; picked = data.instrument; $("m_high").focus(); }
+    else { $("startMsg").textContent = ""; $("m_high").value = ""; $("m_low").value = ""; refresh(); }
   } catch (e) { $("startMsg").textContent = e.message; }
   $("startBtn").disabled = false;
 }
@@ -202,12 +206,13 @@ function renderRuns(runs) {
     const s = r.summary, pos = r.position;
     return `<div class="run" id="run${r.id}"><div class="row"><h3>${r.instrument}</h3><span class="badge ${r.status === "running" ? "ok" : "warn"}">${r.status}</span>
       <span class="small muted">levels from ${r.levels_source} · square-off ${r.squareoff}</span><span style="flex:1"></span><button class="danger" onclick="stopRun(${r.id})">Stop &amp; square off</button></div>
+      <div class="now"><b>What is happening now:</b> ${r.status_text}</div>
       <div class="kv"><span>Last <b>${fmt(r.last_price)}</b></span><span>Ticks <b>${r.ticks}</b></span><span>Last tick <b>${r.last_tick_age == null ? "–" : r.last_tick_age + "s ago"}</b></span>
         <span>Broke High <b>${r.armed_buy ? "yes, waiting for pullback" : "–"}</b></span><span>Broke Low <b>${r.armed_sell ? "yes, waiting for pullback" : "–"}</b></span></div>
       <div class="kv">${pos ? `<span>Open <b>${pos.side}</b> @ <b>${fmt(pos.entry)}</b></span><span>Target <b>${fmt(pos.target)}</b></span><span>Stop <b>${pos.stop ? fmt(pos.stop) : "none"}</b></span><span class="${cls(pos.unrealised_pct)}">Unrealised <b>${fmt(pos.unrealised_pct)}%</b></span>` : '<span class="muted">No open position</span>'}
         <span>Trades <b>${s.trades}</b></span><span>Wins <b>${s.wins}</b></span><span class="${cls(s.net_pnl)}">Net P&amp;L <b>₹${fmt(s.net_pnl)}</b></span></div>
       <canvas id="c${r.id}"></canvas>
-      <ul class="events">${r.events.slice(0, 12).map(e => `<li><b>${e.ts}</b> ${e.kind.replace("_", " ")} ${e.side} @ ${fmt(e.price)} ${e.reason ? "· " + e.reason : ""}</li>`).join("") || '<li class="muted">No signals yet</li>'}</ul></div>`;
+      <ul class="events">${r.log.slice(0, 15).map(l => `<li><b>${l[0]}</b> ${l[1]}</li>`).join("")}</ul></div>`;
   }).join("");
   runs.forEach(r => chart($("c" + r.id), r));
 }
