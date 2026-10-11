@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -9,9 +10,15 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _bool(name: str, default: bool) -> bool:
+def _get(name: str, default: str = "") -> str:
+    """Environment value with any trailing ' # comment' removed (systemd and some shells keep it)."""
     v = os.environ.get(name)
-    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+    return default if v is None else re.split(r"\s+#", v, maxsplit=1)[0].strip()
+
+
+def _bool(name: str, default: bool) -> bool:
+    v = _get(name, "")
+    return default if v == "" else v.lower() in ("1", "true", "yes", "on")
 
 
 def _hhmm(s: str) -> time:
@@ -33,26 +40,26 @@ SESSIONS = {
 
 @dataclass
 class Settings:
-    database_url: str = field(default_factory=lambda: os.environ.get("DATABASE_URL", "sqlite:///data/dryrun.db"))
-    feed_mode: str = field(default_factory=lambda: os.environ.get("FEED_MODE", "dhan").lower())   # dhan | sim
-    dhan_client_id: str = field(default_factory=lambda: os.environ.get("DHAN_CLIENT_ID", ""))
-    dhan_access_token: str = field(default_factory=lambda: os.environ.get("DHAN_ACCESS_TOKEN", ""))
-    feed_packet: str = field(default_factory=lambda: os.environ.get("FEED_PACKET", "quote").lower())  # ticker|quote|full
-    host: str = field(default_factory=lambda: os.environ.get("HOST", "127.0.0.1"))
-    port: int = field(default_factory=lambda: int(os.environ.get("PORT", "8000")))
-    dashboard_password: str = field(default_factory=lambda: os.environ.get("DASHBOARD_PASSWORD", ""))
-    secret_key: str = field(default_factory=lambda: os.environ.get("SECRET_KEY", ""))
-    auth_mode: str = field(default_factory=lambda: os.environ.get("AUTH_MODE", "none").lower())  # none|password|email_otp
-    brevo_api_key: str = field(default_factory=lambda: os.environ.get("BREVO_API_KEY", ""))
-    brevo_sender: str = field(default_factory=lambda: os.environ.get("BREVO_SENDER_EMAIL", ""))
+    database_url: str = field(default_factory=lambda: _get("DATABASE_URL", "sqlite:///data/dryrun.db"))
+    feed_mode: str = field(default_factory=lambda: _get("FEED_MODE", "dhan").lower())   # dhan | sim
+    dhan_client_id: str = field(default_factory=lambda: _get("DHAN_CLIENT_ID", ""))
+    dhan_access_token: str = field(default_factory=lambda: _get("DHAN_ACCESS_TOKEN", ""))
+    feed_packet: str = field(default_factory=lambda: _get("FEED_PACKET", "quote").lower())  # ticker|quote|full
+    host: str = field(default_factory=lambda: _get("HOST", "127.0.0.1"))
+    port: int = field(default_factory=lambda: int(_get("PORT", "8000")))
+    dashboard_password: str = field(default_factory=lambda: _get("DASHBOARD_PASSWORD", ""))
+    secret_key: str = field(default_factory=lambda: _get("SECRET_KEY", ""))
+    auth_mode: str = field(default_factory=lambda: _get("AUTH_MODE", "none").lower())  # none|password|email_otp
+    brevo_api_key: str = field(default_factory=lambda: _get("BREVO_API_KEY", ""))
+    brevo_sender: str = field(default_factory=lambda: _get("BREVO_SENDER_EMAIL", ""))
     allowed_emails: tuple = field(default_factory=lambda: tuple(
-        e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()))
+        e.strip().lower() for e in _get("ALLOWED_EMAILS", "").split(",") if e.strip()))
     store_ticks: bool = field(default_factory=lambda: _bool("STORE_TICKS", True))
-    tick_retention_days: int = field(default_factory=lambda: int(os.environ.get("TICK_RETENTION_DAYS", "30")))
+    tick_retention_days: int = field(default_factory=lambda: int(_get("TICK_RETENTION_DAYS", "30")))
     # Simulated feed has no market hours; real feeds are gated by SESSIONS.
     ignore_market_hours: bool = field(default_factory=lambda: _bool("IGNORE_MARKET_HOURS", False))
-    sim_ticks_per_second: float = field(default_factory=lambda: float(os.environ.get("SIM_TICKS_PER_SECOND", "5")))
-    stale_tick_seconds: float = field(default_factory=lambda: float(os.environ.get("STALE_TICK_SECONDS", "15")))
+    sim_ticks_per_second: float = field(default_factory=lambda: float(_get("SIM_TICKS_PER_SECOND", "5")))
+    stale_tick_seconds: float = field(default_factory=lambda: float(_get("STALE_TICK_SECONDS", "15")))
 
     def __post_init__(self):
         if self.feed_mode == "sim":

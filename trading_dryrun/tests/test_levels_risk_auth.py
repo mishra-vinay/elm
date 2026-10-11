@@ -160,3 +160,30 @@ def test_otp_locks_after_too_many_tries():
     for _ in range(3):
         svc.verify("me@example.com", wrong)
     assert not svc.verify("me@example.com", code)
+
+
+def test_env_values_with_trailing_comments_are_cleaned(monkeypatch):
+    monkeypatch.setenv("FEED_MODE", "sim            # simulated")
+    monkeypatch.setenv("TICK_RETENTION_DAYS", "30   # days")
+    monkeypatch.setenv("STORE_TICKS", "false  # off")
+    s = Settings()
+    assert s.feed_mode == "sim" and s.tick_retention_days == 30 and s.store_ticks is False
+
+
+def test_example_env_file_loads_and_starts(tmp_path, monkeypatch):
+    """The shipped .env.example must parse (a trailing-comment bug once stopped the first deployment)."""
+    import os
+    from pathlib import Path
+    from dryrun.__main__ import _load_env
+    for k in list(os.environ):
+        if k in ("FEED_MODE", "PORT", "HOST", "STORE_TICKS", "TICK_RETENTION_DAYS", "STALE_TICK_SECONDS", "DATABASE_URL"):
+            monkeypatch.delenv(k)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text((Path(__file__).resolve().parents[1] / ".env.example").read_text())
+    _load_env()
+    s = Settings()
+    s.validate()
+    assert s.feed_mode == "sim" and s.port == 8000 and s.tick_retention_days == 30
+    for k in ("FEED_MODE", "PORT", "HOST", "STORE_TICKS", "TICK_RETENTION_DAYS", "STALE_TICK_SECONDS", "DATABASE_URL", "FEED_PACKET",
+              "DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN", "DASHBOARD_PASSWORD", "SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)

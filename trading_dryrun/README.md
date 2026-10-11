@@ -136,8 +136,9 @@ This app needs very little: one process, SQLite, a handful of instruments. A 1 G
    ssh -i key.pem ubuntu@<public-ip>      # then:  nano /opt/dryrun/.env   (FEED_MODE=dhan, credentials)
    sudo systemctl start dryrun && journalctl -u dryrun -f
    ```
-5. From your own computer: `ssh -i key.pem -L 8000:localhost:8000 ubuntu@<public-ip>` and open <http://localhost:8000>.
-6. A daily SQLite backup runs at 16:30 on weekdays (`/opt/dryrun/data/backups`, 14 days kept). Copy it off the machine too (S3 or your computer).
+5. After a code update (`git pull` in the checkout): `bash trading_dryrun/deploy/update.sh` copies it over, restarts, and prints the log if it fails to start. If the service will not start, `sudo journalctl -u dryrun -n 30 --no-pager` shows why.
+6. From your own computer: `ssh -i key.pem -L 8000:localhost:8000 ubuntu@<public-ip>` and open <http://localhost:8000>.
+7. A daily SQLite backup runs at 16:30 on weekdays (`/opt/dryrun/data/backups`, 14 days kept). Copy it off the machine too (S3 or your computer).
 
 Docker alternative: `docker compose -f deploy/docker-compose.yml up -d --build` (needs `DASHBOARD_PASSWORD` in `.env`; the port is published on the host's loopback only).
 

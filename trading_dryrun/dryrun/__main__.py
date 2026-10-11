@@ -1,6 +1,7 @@
 """python -m dryrun  ->  start the dashboard (loads .env if present)."""
 import logging
 import os
+import re
 from pathlib import Path
 
 
@@ -11,7 +12,10 @@ def _load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                v = v.strip()
+                if v[:1] not in ('"', "'"):
+                    v = re.split(r"\s+#", v, maxsplit=1)[0].strip()      # inline comment
+                os.environ.setdefault(k.strip(), v.strip('"').strip("'"))
 
 
 def main():
