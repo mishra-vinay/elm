@@ -1,23 +1,28 @@
 """FastAPI app: dashboard + JSON API. Start with:  python -m dryrun  (see README)."""
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import json
 import logging
+import os
 import threading
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, distinct, func, select
 
 from . import instruments as instr
 from . import levels as levels_mod
 from .auth import COOKIE, Auth, OtpService
-from .config import Settings
+from .config import IST, SESSIONS, Settings
 from .db import ApiLog, Candle, Instrument, Run, Signal, Tick, Trade, Watch, init_db
 from .dhan_feed import DhanFeed
 from .dhan_rest import DhanRest
@@ -47,6 +52,7 @@ class ParamsIn(BaseModel):
 class StartIn(BaseModel):
     instrument_id: int | None = None
     query: str | None = None
+    label: str | None = Field(None, max_length=40)
     params: ParamsIn = ParamsIn()
     prev_high: float | None = None
     prev_low: float | None = None
@@ -75,6 +81,43 @@ class EmailIn(BaseModel):
 
 class TokenIn(BaseModel):
     token: str
+    save: bool = False        # also write it to the server's .env so it survives a restart
+
+
+def token_info(token: str) -> dict:
+    """Expiry of a Dhan access token, read from the token itself (a JWT). The token value is never returned."""
+    if not token:
+        return {"set": False}
+    info = {"set": True, "expires_at": None, "seconds_left": None, "status": "unknown"}
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        if exp:
+            left = int(exp - datetime.now(timezone.utc).timestamp())
+            info.update(expires_at=datetime.fromtimestamp(exp, IST).strftime("%Y-%m-%d %H:%M:%S"), seconds_left=left,
+                        status="expired" if left <= 0 else "expiring soon" if left < 3 * 3600 else "valid")
+    except Exception:      # noqa: BLE001  (not a JWT or unreadable: say so rather than guess)
+        pass
+    return info
+
+
+def save_env_value(key: str, value: str, path: str | None = None) -> None:
+    """Replace (or append) one KEY=value line in the .env file, keeping every other line as it is."""
+    from pathlib import Path
+    p = Path(path or os.environ.get("DRYRUN_ENV_FILE", ".env"))
+    if not p.exists():
+        raise FileNotFoundError(f"{p.resolve()} does not exist")
+    lines, done = p.read_text().splitlines(), False
+    for n, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[n], done = f"{key}={value}", True
+    if not done:
+        lines.append(f"{key}={value}")
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
 
 
 def create_app(settings: Settings | None = None, feed_factory=None, load_master: bool = True, clock=None) -> FastAPI:
@@ -130,9 +173,20 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     def health():
         return {"ok": True}
 
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
     @app.get("/")
-    def index():
-        return FileResponse(STATIC / "index.html")
+    @app.get("/runs")
+    def page_runs():
+        return FileResponse(STATIC / "runs.html")
+
+    @app.get("/market-data")
+    def page_market():
+        return FileResponse(STATIC / "market.html")
+
+    @app.get("/settings")
+    def page_settings():
+        return FileResponse(STATIC / "settings.html")
 
     @app.get("/api/auth/status")
     def auth_status(request: Request):
@@ -184,9 +238,44 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         snap["version"] = "0.1.0"
         return snap
 
+    @app.get("/api/status", dependencies=[Depends(need_auth)])
+    def status():
+        """Small payload for the header badges on every page."""
+        snap = manager.snapshot()
+        return {"now": snap["now"], "mode": snap["mode"], "feed": snap["feed"], "writer_errors": snap["writer_errors"],
+                "active_runs": len(snap["runs"])}
+
+    @app.get("/api/settings", dependencies=[Depends(need_auth)])
+    def get_settings():
+        cid = st.dhan_client_id
+        env_path = os.environ.get("DRYRUN_ENV_FILE", ".env")
+        return {"mode": st.feed_mode, "client_id": ("*" * max(0, len(cid) - 4) + cid[-4:]) if cid else "",
+                "token": token_info(st.dhan_access_token), "data_api_checked": manager.rest is not None,
+                "feed_packet": st.feed_packet, "store_ticks": st.store_ticks, "tick_retention_days": st.tick_retention_days,
+                "stale_tick_seconds": st.stale_tick_seconds, "auth_mode": st.auth_mode,
+                "database": st.database_url.split(":", 1)[0].split("+", 1)[0], "env_file_present": os.path.exists(env_path),
+                "sessions": {k: {"open": f"{v[0]:%H:%M}", "last_entry": f"{v[1]:%H:%M}", "square_off": f"{v[2]:%H:%M}", "close": f"{v[3]:%H:%M}"}
+                             for k, v in SESSIONS.items()},
+                "version": "0.1.0"}
+
+    @app.post("/api/settings/test", dependencies=[Depends(need_auth)])
+    def test_dhan():
+        """Ask Dhan for the profile: proves the token works and shows whether the Data API plan is active."""
+        if manager.rest is None:
+            raise HTTPException(400, "Dhan credentials are not configured")
+        try:
+            prof = manager.rest.profile()
+        except Exception as e:      # noqa: BLE001
+            manager.activity("app", "error", f"Dhan connection test failed: {str(e)[:200]}")
+            raise HTTPException(502, str(e)[:300])
+        keep = ("tokenValidity", "activeSegment", "dataPlan", "dataValidity", "ddpi", "mtf")
+        out = {k: prof[k] for k in keep if k in prof}
+        manager.activity("app", "info", f"Dhan connection test OK (data plan: {out.get('dataPlan', 'not reported')})")
+        return out
+
     def run_row(r: Run) -> dict:
         sm = r.summary or {}
-        return {"id": r.id, "date": r.trading_date, "instrument": r.instrument.label if r.instrument else r.instrument_id,
+        return {"id": r.id, "label": (r.params or {}).get("label", ""), "settings": {k: (r.params or {}).get(k) for k in ("pullback_pct", "target_pct", "stop_pct")}, "date": r.trading_date, "instrument": r.instrument.label if r.instrument else r.instrument_id,
                 "status": r.status, "ran_ok": r.ran_ok, "ticks": r.ticks_received, "trades": sm.get("trades"),
                 "win_rate": sm.get("win_rate"), "net_pnl": sm.get("net_pnl"), "net_pct_sum": sm.get("net_pct_sum"),
                 "coverage": sm.get("data_coverage"), "error": r.error, "high": r.prev_high, "low": r.prev_low,
@@ -249,11 +338,17 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
                 raise HTTPException(400, "enter both previous-day High and Low, with High greater than Low")
             manual = (body.prev_high, body.prev_low)
         try:
-            return await manager.start_run(inst, params, manual)
+            return await manager.start_run(inst, params, manual, (body.label or "").strip() or None)
         except LevelsNeeded as e:
             return JSONResponse(status_code=409, content={"code": "levels_needed", "detail": str(e), "instrument": inst_dict(inst)})
         except StartError as e:
             raise HTTPException(400, str(e))
+
+    @app.post("/api/runs/stop-all", dependencies=[Depends(need_auth)])
+    def stop_all():
+        n = manager.stop_all()
+        manager.writer.flush()
+        return {"stopped": n}
 
     @app.post("/api/runs/{run_id}/stop", dependencies=[Depends(need_auth)])
     def stop_run(run_id: int):
@@ -372,9 +467,17 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         st.dhan_access_token = tok
         if manager.rest is not None:
             manager.rest.token = tok
-        manager.activity("app", "info", "Dhan access token updated from the dashboard; reconnecting the feed")
+        saved = None
+        if body.save:
+            try:
+                save_env_value("DHAN_ACCESS_TOKEN", tok)
+                saved = True
+            except Exception as e:      # noqa: BLE001
+                saved = False
+                manager.activity("app", "warn", f"Token is active but could not be saved to .env: {e}")
+        manager.activity("app", "info", "Dhan access token updated from the dashboard" + (" and saved to .env" if saved else "") + "; reconnecting the feed")
         manager.feed.update_token(tok)
         await manager.feed.reconnect()
-        return {"ok": True}
+        return {"ok": True, "saved_to_env": saved, "token": token_info(tok)}
 
     return app

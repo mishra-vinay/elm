@@ -28,6 +28,7 @@ from .risk import RiskContext, RiskEngine
 from .strategy import BreakoutPullbackEngine, Event, Params
 
 log = logging.getLogger("dryrun.runner")
+MAX_ACTIVE_RUNS = 20
 MAX_JUMP = 0.20          # a single tick moving more than 20% from the previous one is treated as bad data
 
 
@@ -111,6 +112,7 @@ class LiveRun:
     pending_signal: dict | None = None
     error: str | None = None
     closed: bool = False
+    label: str = ""
     log: deque = field(default_factory=lambda: deque(maxlen=200))          # human timeline: (time, text)
 
 
@@ -227,7 +229,7 @@ class RunManager:
     def _log(self, run: LiveRun, text: str, ts: datetime | None = None):
         run.log.appendleft(((ts or self.clock()).strftime("%H:%M:%S"), text))
         level = "warn" if "NOT taken" in text else "info"
-        self.activity("run", level, f"[{run.inst.symbol}] {text}")
+        self.activity("run", level, f"[{run.inst.symbol} #{run.id}{(' ' + run.label) if run.label else ''}] {text}")
 
     def _describe(self, run: LiveRun, ev: Event) -> str | None:
         e, p = run.engine, ev.price
@@ -355,14 +357,15 @@ class RunManager:
                 self.states.pop(key, None)       # keep collecting only if on the watch list
 
     # ------------------------------------------------------------------ API used by the dashboard
-    async def start_run(self, inst: Instrument, params: Params, manual_levels: tuple[float, float] | None = None) -> dict:
+    async def start_run(self, inst: Instrument, params: Params, manual_levels: tuple[float, float] | None = None,
+                        label: str | None = None) -> dict:
         now = self.clock()
         open_t, last_entry_t, squareoff_t, close_t = session_for(inst.segment)
         trading_date = self.next_session_date(now, inst.segment)
         params.validate()
         with self.lock:
-            if any(r.inst.id == inst.id for r in self.runs.values()):
-                raise StartError("A run is already active for this instrument.")
+            if len(self.runs) >= MAX_ACTIVE_RUNS:
+                raise StartError(f"At most {MAX_ACTIVE_RUNS} runs can be active at once; stop one first.")
         if manual_levels:
             lv = levels_mod.set_manual(self.factory, inst.id, trading_date, manual_levels[0], manual_levels[1])
         else:
@@ -373,7 +376,8 @@ class RunManager:
         try:
             engine_params = params
             with self.factory() as s:
-                run = Run(instrument_id=inst.id, status="waiting", trading_date=trading_date, params=engine_params.as_dict(),
+                run = Run(instrument_id=inst.id, status="waiting", trading_date=trading_date,
+                          params={**engine_params.as_dict(), **({"label": label} if label else {})},
                           prev_high=lv.high, prev_low=lv.low, levels_source=lv.source)
                 s.add(run)
                 s.commit()
@@ -386,7 +390,7 @@ class RunManager:
             return holder["risk"].approve(side, ts, price, state)
 
         engine = BreakoutPullbackEngine(lv.high, lv.low, params, approve=approve)
-        live = LiveRun(run_id, inst, params, engine, trading_date, lv, open_t, last_entry_t, squareoff_t,
+        live = LiveRun(run_id, inst, params, engine, trading_date, lv, open_t, last_entry_t, squareoff_t, label=label or "",
                        started_disconnects=getattr(self.feed, "disconnects", 0) or 0)
         holder["risk"] = RiskEngine(RiskContext(
             last_tick_at=lambda: self._prev_msg, now=lambda: self._cur_msg or self.clock(), last_entry_time=last_entry_t,
@@ -426,6 +430,11 @@ class RunManager:
             while d.weekday() >= 5:
                 d += timedelta(days=1)
         return d
+
+    def stop_all(self) -> int:
+        with self.lock:
+            ids = list(self.runs)
+        return sum(1 for rid in ids if self.stop_run(rid))
 
     def stop_run(self, run_id: int) -> bool:
         with self.lock:
@@ -535,7 +544,7 @@ class RunManager:
                     sign = 1 if pos.side == "BUY" else -1
                     unreal = sign * (r.last_price - pos.entry_price) / pos.entry_price * 100
                 runs.append({
-                    "id": r.id, "instrument": r.inst.label, "symbol": r.inst.symbol, "status": r.status,
+                    "id": r.id, "label": r.label, "instrument": r.inst.label, "symbol": r.inst.symbol, "status": r.status,
                     "high": r.levels.high, "low": r.levels.low, "levels_source": r.levels.source + (f" {r.levels.from_date}" if r.levels.from_date else ""),
                     "buy_trigger": e.buy_entry_level, "sell_trigger": e.sell_entry_level,
                     "break_up": e.break_up_level, "break_down": e.break_down_level,

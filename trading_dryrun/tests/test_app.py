@@ -63,7 +63,6 @@ def test_levels_needed_then_manual_entry(tmp_path):
         assert r.status_code == 409 and r.json()["code"] == "levels_needed"
         assert c.post("/api/runs", json={"query": "NIFTY 50", "prev_high": 90, "prev_low": 95}).status_code == 400
         assert c.post("/api/runs", json={"query": "NIFTY 50", "prev_high": 100, "prev_low": 95}).status_code == 200
-        assert c.post("/api/runs", json={"query": "NIFTY 50", "prev_high": 100, "prev_low": 95}).status_code == 400   # duplicate run
 
 
 def test_validation_and_unknown_instrument(tmp_path):

@@ -117,16 +117,18 @@ engine over stored candles (open→low→high→close inside each bar for up bar
 * **Delete** (per row in *Stored candles*) — removes that instrument's candles for that interval. Runs, signals and trades are never deleted by it.
 * **Previous-day High/Low** next morning: manual entry → the stored daily candle of the last trading day → if that candle is older than the previous weekday, a fresh fetch from Dhan → levels derived from stored real intraday candles. The run's timeline shows which source and which date were used.
 
-## Dashboard
+## Dashboard (three pages, activity log on each)
 
-1. **Start a dry run** — search box (name, symbol, security id, or `NSE_FNO:48704`-style), the settings above, and manual High/Low fields that appear if none are found.
-2. **Active runs** — price chart with previous High/Low, trigger levels, entry/target/stop lines; break status, open position and unrealised %, trades, net P&L, recent signals; **Stop & square off**.
-3. **Finished runs** — status, ran OK, ticks, trades, win %, net P&L, data coverage, and a details view with every signal and trade.
-4. **Market data collection** — collect ticks, download history, reload the instrument list, stored-candle summary.
-5. **Feed log**, Dhan token box, feed status badge (connected, subscribed count, seconds since last message), writer-queue and database-error counters.
+* **Dry runs** (`/`) — start a run (search box, settings, previous-day High/Low filled in automatically, optional run name), see **Active runs** (summary table plus a card per run with chart, "what is happening now", timeline and Stop) and **Finished runs** (status, ran OK, settings, trades, win %, net P&L, coverage, details).
+  You can run **several at once**, up to 20: different instruments, or the *same* instrument with different settings and names to compare them. **Stop all** squares everything off.
+* **Market data** (`/market-data`) — collect live ticks, download history (incremental), keep instruments updated after the close, reload the instrument list, see what is recorded and stored, delete stored candles.
+* **Settings** (`/settings`) — Dhan connection (mode, masked client id, token status and expiry read from the token itself), **Test connection and data plan**, **Update token** (optionally saved to the server's `.env` so it survives a restart), read-only configuration and session times.
+* **Activity log** (bottom of every page) — runs, market feed, data jobs, risk rejections, app events and errors, newest first, with filters.
 
-A run is for **one trading day**: it squares off at the session's square-off time and is finalised. If the app restarts mid-run, that run is marked
-*interrupted* (stored ticks remain) rather than silently resumed with lost state.
+Header on every page: feed status, number of active runs, clock (IST), and a CSV download of all simulated trades.
+
+A run is for **one trading day**: it squares off at the session's square-off time and is finalised. A run started when the market is closed is scheduled for the next session. If the app restarts mid-run, that run is marked *interrupted* (stored ticks remain) rather than silently resumed with lost state.
+Real-order live trading is **not part of this phase**; the page says so and nothing in the app can place an order.
 
 ## Login
 

@@ -193,7 +193,7 @@ def test_activity_log_collects_run_feed_data_and_risk_events(tmp_path):
         m.writer.flush()
         allrows = c.get("/api/activity").json()
         text = "\n".join(r["message"] for r in allrows)
-        assert "[BAJFINANCE] Run started" in text and "Subscribed to Bajaj Finance" in text and "simulated feed started" in text
+        assert "[BAJFINANCE #1] Run started" in text and "Subscribed to Bajaj Finance" in text and "simulated feed started" in text
         assert [r["message"] for r in c.get("/api/activity", params={"source": "data"}).json()][0].startswith("History download failed")
         assert [r["level"] for r in c.get("/api/activity", params={"source": "errors"}).json()] == ["error"]
         assert allrows[0]["id"] > allrows[-1]["id"]                                  # newest first
