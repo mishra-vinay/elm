@@ -16,6 +16,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+import demo_strategy                                  # noqa: E402  (the test-only strategy: the app ships none, the benchmark needs an engine)
+
 from fastapi.testclient import TestClient            # noqa: E402
 from sqlalchemy import insert, select                 # noqa: E402
 
@@ -88,7 +91,7 @@ def main():
         m = app.state.manager
         for inst in insts[:5]:
             r = c.post("/api/runs", json={"instrument_id": inst.id, "prev_high": 101, "prev_low": 99, "label": f"bench {inst.symbol}",
-                                       "params": {"pullback_pct": 0.05, "target_pct": 0.1, "stop_pct": 0.1, "max_trades_per_day": 50, "max_trades_per_side": 10}})
+                                       "params": demo_strategy.jp(pullback_pct=0.05, target_pct=0.1, stop_pct=0.1, max_trades_per_day=50, max_trades_per_side=10)})
             assert r.status_code == 200, r.text
         print(f"{'what the page asks for':44s} {'median ms':>10s} {'p95 ms':>9s}")
         paths = [("/api/status (header, every 2 s)", "/api/status"), ("/api/state (dry-runs page, every 2 s)", "/api/state"),

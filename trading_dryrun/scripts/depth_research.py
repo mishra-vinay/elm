@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dryrun.depth_research import RULES, run_all, write_report      # noqa: E402
+import json
+
+from dryrun.depth_research import RULES, run_all, to_json, write_report      # noqa: E402
 
 
 def main():
@@ -24,6 +26,7 @@ def main():
     ap.add_argument("--fee-pct", type=float, default=0.06, help="round-trip fee in percent of price (futures convention used elsewhere in this repo)")
     ap.add_argument("--stop-ticks", type=float, default=8.0)
     ap.add_argument("--out", default="data/depth_research_report.md")
+    ap.add_argument("--json", default="", help="also write the results (without trades) as JSON, used by the dashboard page")
     a = ap.parse_args()
     if not Path(a.db).exists():
         sys.exit("no such file: %s" % a.db)
@@ -31,7 +34,9 @@ def main():
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     csv_path = str(Path(a.out).with_suffix(".trades.csv"))
     text = write_report(res, a.out, csv_path)
-    print(text)
+    if a.json:
+        Path(a.json).write_text(json.dumps(to_json(res), allow_nan=False))
+    print(text if not a.json else "report written")
     print("report: %s\ntrades: %s\n%d variants, %d day(s) recorded" % (a.out, csv_path, len(RULES), len(res["days"])))
 
 

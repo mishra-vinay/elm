@@ -28,7 +28,7 @@ from .auth import COOKIE, Auth, OtpService
 from .config import IST, SESSIONS, Settings
 from .db import ApiLog, Candle, Instrument, Run, Signal, Tick, Trade, Watch, delete_ticks, init_db, set_setting
 from .dhan_feed import DhanFeed
-from .depth_service import BUCKETS, DepthService
+from .depth_service import BUCKETS, DepthService, ResearchRunner
 from .backtests import BacktestError, BacktestJobs, day_view
 from .dhan_rest import DhanRest
 from .history import backfill
@@ -51,6 +51,20 @@ class ParamsIn(BaseModel):
     max_trades_per_side: int = Field(1, ge=1, le=10)
     max_trades_per_day: int = Field(2, ge=1, le=50)
     daily_loss_limit_pct: float | None = 2.0
+
+
+class DepthTargetIn(BaseModel):
+    segment: str
+    security_id: str
+    label: str = ""
+    on: bool = True
+
+
+class ResearchIn(BaseModel):
+    security_id: str
+    bar_seconds: int = Field(10, ge=5, le=60)
+    fee_pct: float = Field(0.06, ge=0, le=1)
+    stop_ticks: float = Field(8.0, ge=1, le=100)
 
 
 class PreviewIn(BaseModel):
@@ -174,6 +188,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     _url = st.database_url
     depth_path = str(Path(_url.split("sqlite:///", 1)[1]).parent / "depth.db") if _url.startswith("sqlite:///") else "data/depth.db"
     depth = DepthService(st, depth_path, _depth_default) if (st.feed_mode == "dhan" and feed_factory is None) else None
+    research = ResearchRunner(depth_path, str(Path(depth_path).parent / "depth_research"))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -227,6 +242,10 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     @app.get("/market-data")
     def page_market():
         return FileResponse(STATIC / "market.html")
+
+    @app.get("/depth-research")
+    def page_depth_research():
+        return FileResponse(STATIC / "depth-research.html")
 
     @app.get("/depth")
     def page_depth():
@@ -682,12 +701,6 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
             raise HTTPException(400, "the depth recorder runs only with the live Dhan feed")
         return depth
 
-    class DepthTargetIn(BaseModel):
-        segment: str
-        security_id: str
-        label: str = ""
-        on: bool = True
-
     @app.get("/api/depth/status", dependencies=[Depends(need_auth)])
     def depth_status():
         return need_depth().status()
@@ -726,6 +739,32 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         if bucket not in BUCKETS:
             raise HTTPException(400, f"bucket must be one of {list(BUCKETS)}")
         return need_depth().stats(security_id, day.isoformat(), bucket, horizon)
+
+    @app.post("/api/depth/research", dependencies=[Depends(need_auth)])
+    def depth_research_run(body: ResearchIn):
+        need_depth()
+        if not research.start(body.security_id, body.bar_seconds, body.fee_pct, body.stop_ticks):
+            raise HTTPException(409, "a research run is already in progress")
+        return {"ok": True}
+
+    @app.get("/api/depth/research", dependencies=[Depends(need_auth)])
+    def depth_research_state():
+        need_depth()
+        return research.state()
+
+    @app.get("/api/depth/research/report.md", dependencies=[Depends(need_auth)])
+    def depth_research_report():
+        p = Path(depth_path).parent / "depth_research" / "report.md"
+        if not p.exists():
+            raise HTTPException(404, "no report yet")
+        return FileResponse(p, media_type="text/markdown", filename="depth_research_report.md")
+
+    @app.get("/api/depth/research/trades.csv", dependencies=[Depends(need_auth)])
+    def depth_research_trades():
+        p = Path(depth_path).parent / "depth_research" / "report.trades.csv"
+        if not p.exists():
+            raise HTTPException(404, "no trades file yet")
+        return FileResponse(p, media_type="text/csv", filename="depth_research_trades.csv")
 
     @app.get("/api/depth/export.csv", dependencies=[Depends(need_auth)])
     def depth_export(security_id: str, day: date):

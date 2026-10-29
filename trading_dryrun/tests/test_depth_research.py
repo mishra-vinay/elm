@@ -51,3 +51,44 @@ def test_one_day_cannot_be_flagged_and_report_writes(tmp_path):
     text = write_report(res, str(tmp_path / "r.md"), str(tmp_path / "t.csv"))
     assert "Depth research report" in text and len(RULES) == len(res["results"])
     assert (tmp_path / "t.csv").read_text().startswith("rule,day,side")
+
+
+def test_runner_produces_dashboard_json(tmp_path):
+    import json
+    import time
+    from dryrun.depth_research import to_json
+    from dryrun.depth_service import ResearchRunner
+    db = str(tmp_path / "d.db")
+    make_db(db, days=2)
+    assert json.dumps(to_json(run_all(db, "574320")), allow_nan=False)           # no infinity/NaN reaches the browser
+    import os
+    os.chdir(tmp_path)                                                          # the dashboard runs with a relative data/ path
+    rr = ResearchRunner(db, "out")
+    assert rr.start("574320", 10, 0.06, 8.0) and not rr.start("574320", 10, 0.06, 8.0)
+    for _ in range(120):
+        if not rr.running:
+            break
+        time.sleep(0.5)
+    st = rr.state()
+    assert not st["running"] and st["error"] is None and len(st["result"]["results"]) == len(RULES) and st["finished"]
+
+
+def test_depth_post_routes_accept_json_bodies():
+    """Request-body models must be module-level (FastAPI cannot resolve locally defined ones under postponed annotations)."""
+    import dryrun.app as appmod
+    for name in ("DepthTargetIn", "ResearchIn"):
+        assert hasattr(appmod, name)
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+
+    @app.post("/t")
+    def t(body: appmod.DepthTargetIn):
+        return {"sid": body.security_id}
+
+    @app.post("/r")
+    def r(body: appmod.ResearchIn):
+        return {"b": body.bar_seconds}
+    c = TestClient(app)
+    assert c.post("/t", json={"segment": "MCX_COMM", "security_id": "574320"}).json() == {"sid": "574320"}
+    assert c.post("/r", json={"security_id": "574320"}).json() == {"b": 10}

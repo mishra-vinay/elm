@@ -306,3 +306,21 @@ def write_report(res: dict, path: str, trades_csv: Optional[str] = None) -> str:
                     w.writerow([t.rule, t.day, "BUY" if t.side > 0 else "SELL", datetime.fromtimestamp(t.t_in / 1000, IST).strftime("%H:%M:%S"),
                                 datetime.fromtimestamp(t.t_out / 1000, IST).strftime("%H:%M:%S"), t.entry, t.exit, t.reason, round(t.gross_pts, 3), round(t.net_pct, 4)])
     return text
+
+
+def _clean(x):
+    if isinstance(x, float) and (x != x or x in (float("inf"), float("-inf"))):
+        return None                                  # JSON has no infinity (a rule with no losing trade has an infinite profit factor)
+    if isinstance(x, dict):
+        return {k: _clean(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_clean(v) for v in x]
+    return x
+
+
+def to_json(res: dict) -> dict:
+    """Result without the individual trades, for the dashboard."""
+    return _clean({"days": res["days"], "bars": res["bars"], "bar_s": res["bar_s"], "tick": res["tick"], "fee_pct": res["fee_pct"],
+            "stop_ticks": res["stop_ticks"],
+            "results": [{"rule": r["rule"], "full": r["full"], "train": r["train"], "test": r["test"], "mode": r["mode"], "verdict": r["verdict"]}
+                        for r in res["results"]]})

@@ -19,7 +19,7 @@ async function api(path, opts) {
   return {status: r.status, data};
 }
 
-const NAV = [["runs", "/", "Dry runs"], ["ticks", "/ticks", "Live ticks"], ["depth", "/depth", "Depth"], ["backtest", "/backtest", "Backtest"], ["strategies", "/strategies", "Strategies"], ["market", "/market-data", "Market data"], ["settings", "/settings", "Settings"]];
+const NAV = [["runs", "/", "Dry runs"], ["ticks", "/ticks", "Live ticks"], ["depth", "/depth", "Depth"], ["depthres", "/depth-research", "Depth research"], ["backtest", "/backtest", "Backtest"], ["strategies", "/strategies", "Strategies"], ["market", "/market-data", "Market data"], ["settings", "/settings", "Settings"]];
 function renderHeader(active) {
   $("hdr").innerHTML = `<header><h1>Dry-run trading</h1>
     <nav>${NAV.map(([k, h, t]) => `<a href="${h}" class="${k === active ? "on" : ""}">${t}</a>`).join("")}</nav>

@@ -13,6 +13,10 @@ import os
 import queue
 import sqlite3
 import threading
+import json
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -357,3 +361,48 @@ class DepthService:
         res["spikes"].sort(key=lambda x: -x["vol"])
         res["spikes"] = res["spikes"][:15]
         return res
+
+
+class ResearchRunner:
+    """Runs scripts/depth_research.py as a separate low-priority process, so the live feed is never slowed by it."""
+
+    def __init__(self, db_path: str, out_dir: str):
+        self.db_path, self.out_dir = os.path.abspath(db_path), Path(os.path.abspath(out_dir))
+        self.proc: Optional[subprocess.Popen] = None
+        self.started: Optional[str] = None
+        self.params: dict = {}
+
+    @property
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, security_id: str, bar_seconds: int, fee_pct: float, stop_ticks: float) -> bool:
+        if self.running:
+            return False
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        script = Path(__file__).resolve().parents[1] / "scripts" / "depth_research.py"
+        cmd = ["nice", "-n", "19", sys.executable, str(script), "--db", self.db_path, "--security-id", str(security_id),
+               "--bar-seconds", str(int(bar_seconds)), "--fee-pct", str(float(fee_pct)), "--stop-ticks", str(float(stop_ticks)),
+               "--out", str(self.out_dir / "report.md"), "--json", str(self.out_dir / "latest.json.tmp")]
+        self.params = {"security_id": str(security_id), "bar_seconds": int(bar_seconds), "fee_pct": float(fee_pct), "stop_ticks": float(stop_ticks)}
+        self.started = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        self.err = open(self.out_dir / "run.log", "w")
+        self.proc = subprocess.Popen(cmd, stdout=self.err, stderr=subprocess.STDOUT, cwd=str(self.out_dir))
+        return True
+
+    def state(self) -> dict:
+        tmp, final = self.out_dir / "latest.json.tmp", self.out_dir / "latest.json"
+        if self.proc is not None and self.proc.poll() == 0 and tmp.exists():
+            tmp.replace(final)
+        err = None
+        if self.proc is not None and self.proc.poll() not in (None, 0):
+            log_p = self.out_dir / "run.log"
+            err = (log_p.read_text()[-400:] if log_p.exists() else "failed")
+        result = None
+        if final.exists():
+            try:
+                result = json.loads(final.read_text())
+            except Exception:      # noqa: BLE001
+                result = None
+        return {"running": self.running, "started": self.started, "params": self.params, "error": err, "result": result,
+                "finished": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(final.stat().st_mtime)) if final.exists() else None}
