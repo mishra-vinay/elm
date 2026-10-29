@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from dryrun.strategy import BreakoutPullbackEngine, Params
+from demo_strategy import P, DemoEngine
 
 T0 = datetime(2026, 10, 9, 10, 0, 0)
 
@@ -10,7 +10,7 @@ T0 = datetime(2026, 10, 9, 10, 0, 0)
 def run(prices, high=100.0, low=95.0, **kw):
     kw.setdefault("slippage_pct", 0.0)
     kw.setdefault("cost_pct", 0.0)
-    eng = BreakoutPullbackEngine(high, low, Params(**kw))
+    eng = DemoEngine(high, low, P(**kw))
     evs = []
     for i, p in enumerate(prices):
         evs += eng.on_tick(T0 + timedelta(seconds=i), p)
@@ -110,7 +110,7 @@ def test_daily_loss_limit_blocks_after_losses():
 
 
 def test_risk_callback_can_veto():
-    eng = BreakoutPullbackEngine(100, 95, Params(slippage_pct=0, cost_pct=0), approve=lambda *a: (False, "risk: test"))
+    eng = DemoEngine(100, 95, P(slippage_pct=0, cost_pct=0), approve=lambda *a: (False, "risk: test"))
     evs = []
     for i, p in enumerate([100.5, 99.0]):
         evs += eng.on_tick(T0 + timedelta(seconds=i), p)
@@ -128,11 +128,11 @@ def test_costs_and_quantity_in_pnl():
 
 def test_invalid_inputs():
     with pytest.raises(ValueError):
-        BreakoutPullbackEngine(95, 100, Params())
+        DemoEngine(95, 100, P())
     with pytest.raises(ValueError):
-        Params(target_pct=0).validate()
+        P(target_pct=0).validate()
     with pytest.raises(ValueError):
-        Params(stop_pct=-1).validate()
+        P(stop_pct=-1).validate()
 
 
 def test_zero_pullback_means_retest_of_the_level():

@@ -12,7 +12,10 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
+from sqlalchemy.exc import IntegrityError
+
 from .db import Candle, Instrument
+from .dhan_rest import DhanError
 
 log = logging.getLogger("dryrun.history")
 INTERVAL_LABEL = {1: "1m", 5: "5m", 15: "15m", 25: "25m", 60: "60m", 0: "D"}
@@ -20,26 +23,35 @@ INTERVAL_LABEL = {1: "1m", 5: "5m", 15: "15m", 25: "25m", 60: "60m", 0: "D"}
 
 def store_candles(factory: sessionmaker, instrument_id: int, interval: str, rows: list[dict], source: str) -> int:
     """Insert candles. Rows that already exist are skipped, except that official API candles replace ones we built
-    ourselves from live ticks (source live/sim). Returns the number inserted or replaced."""
+    ourselves from live ticks (source live/sim). Returns the number inserted or replaced.
+
+    The live collector may write the current minute's candle while a large download is being inserted. If that makes the commit fail on the unique
+    (instrument, interval, time) key, the whole insert is repeated against the rows that now exist (an official candle then replaces the live one)."""
     if not rows:
         return 0
-    with factory() as s:
-        have = {c.ts: c for c in s.scalars(select(Candle).where(
-            Candle.instrument_id == instrument_id, Candle.interval == interval,
-            Candle.ts >= min(r["ts"] for r in rows), Candle.ts <= max(r["ts"] for r in rows)))}
-        n = 0
-        for r in rows:
-            cur = have.get(r["ts"])
-            if cur is None:
-                s.add(Candle(instrument_id=instrument_id, interval=interval, ts=r["ts"], open=r["open"], high=r["high"],
-                             low=r["low"], close=r["close"], volume=r.get("volume"), source=source))
-                n += 1
-            elif source == "api" and cur.source != "api":
-                cur.open, cur.high, cur.low, cur.close, cur.volume, cur.source = (
-                    r["open"], r["high"], r["low"], r["close"], r.get("volume"), "api")
-                n += 1
-        s.commit()
-        return n
+    rows = list({r["ts"]: r for r in rows}.values())       # Dhan's daily series repeats a date on contract roll-over days: keep one row per time (the later one)
+    for attempt in range(4):
+        try:
+            with factory() as s:
+                have = {c.ts: c for c in s.scalars(select(Candle).where(
+                    Candle.instrument_id == instrument_id, Candle.interval == interval,
+                    Candle.ts >= min(r["ts"] for r in rows), Candle.ts <= max(r["ts"] for r in rows)))}
+                n = 0
+                for r in rows:
+                    cur = have.get(r["ts"])
+                    if cur is None:
+                        s.add(Candle(instrument_id=instrument_id, interval=interval, ts=r["ts"], open=r["open"], high=r["high"],
+                                     low=r["low"], close=r["close"], volume=r.get("volume"), source=source))
+                        n += 1
+                    elif source == "api" and cur.source != "api":
+                        cur.open, cur.high, cur.low, cur.close, cur.volume, cur.source = (
+                            r["open"], r["high"], r["low"], r["close"], r.get("volume"), "api")
+                        n += 1
+                s.commit()
+                return n
+        except IntegrityError:
+            log.warning("candle insert collided with a concurrent write (attempt %d); repeating", attempt + 1)
+    raise RuntimeError("could not store candles: repeated key collisions")
 
 
 def store_live_bar(s, instrument_id: int, bar, source: str) -> None:
@@ -47,6 +59,11 @@ def store_live_bar(s, instrument_id: int, bar, source: str) -> None:
     if s.scalar(select(Candle.id).where(Candle.instrument_id == instrument_id, Candle.interval == "1m", Candle.ts == bar.ts)) is None:
         s.add(Candle(instrument_id=instrument_id, interval="1m", ts=bar.ts, open=bar.open, high=bar.high, low=bar.low,
                      close=bar.close, volume=bar.volume, source=source))
+
+
+def _no_data(e: Exception) -> bool:
+    """Dhan answers DH-907 when a contract has no candles for the requested range (not listed or not traded yet): that is an empty result, not a failure."""
+    return "DH-907" in str(e)
 
 
 def _latest(factory: sessionmaker, instrument_id: int, interval: str):
@@ -71,7 +88,12 @@ def backfill(factory: sessionmaker, rest, inst: Instrument, daily_from: date | N
     cur = d_from
     while cur <= today:
         end = min(date(cur.year + 10, 12, 31), today + timedelta(days=1))
-        rows = rest.daily(inst.segment, inst.security_id, inst.instrument, cur, end)
+        try:
+            rows = rest.daily(inst.segment, inst.security_id, inst.instrument, cur, end)
+        except DhanError as e:
+            if not _no_data(e):
+                raise
+            rows = []
         out["daily"] += store_candles(factory, inst.id, "D", rows, "api")
         cur = end + timedelta(days=1)
     if intraday_days > 0:
@@ -83,7 +105,12 @@ def backfill(factory: sessionmaker, rest, inst: Instrument, daily_from: date | N
             out["intraday_from"] = start.isoformat()
             if progress:
                 progress(f"{iv}-minute candles from {start}")
-            rows = rest.intraday(inst.segment, inst.security_id, inst.instrument, iv, start, today)
+            try:
+                rows = rest.intraday(inst.segment, inst.security_id, inst.instrument, iv, start, today)
+            except DhanError as e:
+                if not _no_data(e):
+                    raise
+                rows = []
             out["intraday"] += store_candles(factory, inst.id, INTERVAL_LABEL[iv], rows, "api")
     return out
 

@@ -183,7 +183,7 @@ def test_example_env_file_loads_and_starts(tmp_path, monkeypatch):
     _load_env()
     s = Settings()
     s.validate()
-    assert s.feed_mode == "sim" and s.port == 8000 and s.tick_retention_days == 30
+    assert s.feed_mode == "sim" and s.port == 8000 and s.tick_retention_days == 3
     for k in ("FEED_MODE", "PORT", "HOST", "STORE_TICKS", "TICK_RETENTION_DAYS", "STALE_TICK_SECONDS", "DATABASE_URL", "FEED_PACKET",
               "DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN", "DASHBOARD_PASSWORD", "SECRET_KEY"):
         monkeypatch.delenv(k, raising=False)

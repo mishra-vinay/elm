@@ -721,6 +721,12 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
             raise HTTPException(400, f"bucket must be one of {list(BUCKETS)}")
         return need_depth().series(security_id, day.isoformat(), bucket, since_ms)
 
+    @app.get("/api/depth/stats", dependencies=[Depends(need_auth)])
+    def depth_stats(security_id: str, day: date, bucket: int = 60, horizon: int = 5):
+        if bucket not in BUCKETS:
+            raise HTTPException(400, f"bucket must be one of {list(BUCKETS)}")
+        return need_depth().stats(security_id, day.isoformat(), bucket, horizon)
+
     @app.get("/api/depth/export.csv", dependencies=[Depends(need_auth)])
     def depth_export(security_id: str, day: date):
         con, cur, header = need_depth().export_rows(security_id, day.isoformat())

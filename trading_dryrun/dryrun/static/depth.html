@@ -51,8 +51,20 @@
     </div>
     <div id="chartBox"><canvas id="cv"></canvas><div id="tip"></div></div>
     <div class="help"><b>Panels, top to bottom:</b> price candles (triangles mark buckets with unusually large volume: green = price rose, red = fell) ·
-      volume traded in each bucket · quantity waiting at the 5 bid levels (green) and 5 offer levels (red) at the end of the bucket ·
+      volume traded in each bucket, split by who hit whom: green = bought at the offer (buyers aggressive), red = sold at the bid (sellers aggressive), grey = in between · quantity waiting at the 5 bid levels (green) and 5 offer levels (red) at the end of the bucket ·
       imbalance = (bid - offer) / (bid + offer): above 0 means more buyers queued. Hover to read all values for one time; every panel shares the time axis.</div>
+  </section>
+  <section>
+    <h2>What price did after volume and queue demand <span class="muted small">for the day and bucket size chosen above</span></h2>
+    <div class="row"><label style="margin:0">Look ahead</label><select id="stH"><option value="1">1 bucket</option><option value="2">2 buckets</option><option value="5" selected>5 buckets</option><option value="10">10 buckets</option></select>
+      <span class="muted small" id="stNote"></span></div>
+    <div id="stSummary" style="margin:8px 0"></div>
+    <div class="tbl"><table id="stImb"><thead><tr><th>Queue at the end of a bucket</th><th class="num">Times</th><th class="num">Avg price change over the look-ahead (pts)</th><th class="num">Price rose</th></tr></thead><tbody></tbody></table></div>
+    <h2 style="margin-top:14px">Biggest volume spikes</h2>
+    <div class="tbl"><table id="stSp"><thead><tr><th>Time</th><th class="num">Volume</th><th class="num">x average</th><th class="num">Buyers hit offer</th><th class="num">Sellers hit bid</th><th class="num">Price move in bucket</th><th class="num">Imbalance</th><th class="num">Change afterwards</th></tr></thead><tbody></tbody></table></div>
+    <div class="help"><b>How to read it.</b> <i>Imbalance</i> = (quantity queued at the 5 bids - at the 5 offers) / total. <i>Buyers hit offer</i> = volume that traded at or above the best offer
+      (aggressive buying); <i>sellers hit bid</i> the opposite. Strong buying with price not rising, or a big bid queue that price falls through, is the kind of pattern to look for.
+      Treat these as descriptions of one day: with few buckets the averages are noisy, and a queue can be placed and pulled without trading. Collect several sessions before trusting any rule.</div>
   </section>
   <section id="activity"></section>
 </main>
@@ -116,7 +128,7 @@ async function loadChart() {
   const sid = $("chSel").value, day = $("chDay").value; if (!sid || !day) { series = null; draw(); return; }
   $("csvLink").href = `/api/depth/export.csv?security_id=${sid}&day=${day}`;
   const {data} = await api(`/api/depth/series?security_id=${sid}&day=${day}&bucket=${$("chBucket").value}`);
-  series = data.points; $("chNote").textContent = `${series.length} buckets`; draw();
+  series = data.points; $("chNote").textContent = `${series.length} buckets`; draw(); loadStats();
 }
 
 function draw() {
@@ -144,7 +156,9 @@ function draw() {
     if ((p.vol || 0) > thr && sd > 0) { const ty = yp(p.h) - 7; g.beginPath(); g.moveTo(x, ty); g.lineTo(x - 4, ty - 7); g.lineTo(x + 4, ty - 7); g.closePath(); g.fill(); } }
   // volume
   const vmax = Math.max(1, ...vols); frame("vol", 0, vmax, v => fmtN(Math.round(v))); const yv = scaleY("vol", 0, vmax), vb = boxes.vol[1];
-  for (const p of series) { g.fillStyle = p.c >= p.o ? green : red; const yy = yv(p.vol || 0); g.fillRect(X(p.t), yy, bw, vb - yy); }
+  for (const p of series) { const tot = p.vol || 0, b = Math.min(p.buyv, tot), sl = Math.min(p.sellv, tot - b), x = X(p.t);
+    g.fillStyle = green; g.fillRect(x, yv(b), bw, vb - yv(b)); g.fillStyle = red; g.fillRect(x, yv(b + sl), bw, yv(b) - yv(b + sl));
+    g.fillStyle = col("--muted"); g.fillRect(x, yv(tot), bw, yv(b + sl) - yv(tot)); }
   // book
   const bmax = Math.max(1, ...series.map(p => Math.max(p.bid5, p.ask5))); frame("book", 0, bmax, v => fmtN(Math.round(v))); const yb = scaleY("book", 0, bmax);
   for (const [k, c] of [["bid5", green], ["ask5", red]]) { g.strokeStyle = c; g.lineWidth = 1.4; g.beginPath(); series.forEach((p, i) => { const x = X(p.t) + bw / 2; i ? g.lineTo(x, yb(p[k])) : g.moveTo(x, yb(p[k])); }); g.stroke(); g.lineWidth = 1; }
@@ -158,6 +172,28 @@ function draw() {
   g.textAlign = "left";
   if (hoverX != null) { g.strokeStyle = blue; g.beginPath(); g.moveTo(hoverX, 4); g.lineTo(hoverX, H - 22); g.stroke(); }
 }
+
+async function loadStats() {
+  const sid = $("chSel").value, day = $("chDay").value; if (!sid || !day) return;
+  const {data: d} = await api(`/api/depth/stats?security_id=${sid}&day=${day}&bucket=${$("chBucket").value}&horizon=${$("stH").value}`);
+  if (!d.summary) { $("stSummary").innerHTML = '<span class="muted">Not enough data yet (needs at least 3 buckets).</span>'; $("stImb").querySelector("tbody").innerHTML = ""; $("stSp").querySelector("tbody").innerHTML = ""; return; }
+  const m = d.summary, cl = m.volume ? Math.round(100 * m.buy_aggr / m.volume) : 0, sl = m.volume ? Math.round(100 * m.sell_aggr / m.volume) : 0;
+  $("stNote").textContent = `${d.buckets} buckets of ${$("chBucket").selectedOptions[0].text}`;
+  $("stSummary").innerHTML = `<div class="row">
+    <div class="stat"><span>Volume</span><b>${fmtN(m.volume)}</b></div>
+    <div class="stat"><span>Buyers hit offer</span><b class="pos">${fmtN(m.buy_aggr)} (${cl}%)</b></div>
+    <div class="stat"><span>Sellers hit bid</span><b class="neg">${fmtN(m.sell_aggr)} (${sl}%)</b></div>
+    <div class="stat"><span>Net (buy - sell)</span><b class="${cls(m.net_delta)}">${fmtN(m.net_delta)}</b></div>
+    <div class="stat"><span>Average imbalance</span><b class="${cls(m.avg_imbalance)}">${m.avg_imbalance}</b></div>
+    <div class="stat"><span>Price</span><b>${fmt(m.price_open)} → ${fmt(m.price_close)}</b></div>
+    <div class="stat" title="correlation between net buying and the price change in the same bucket (-1..1)"><span>Net buying vs price move</span><b>${m.corr_delta_move ?? "–"}</b></div>
+    <div class="stat" title="correlation between the queue imbalance and the price change over the look-ahead (-1..1)"><span>Imbalance vs later move</span><b>${m.corr_imb_fwd ?? "–"}</b></div></div>`;
+  $("stImb").querySelector("tbody").innerHTML = d.imbalance.map(r => `<tr><td>${r.label}</td><td class="num">${r.n}</td><td class="num ${cls(r.mean_fwd)}">${r.mean_fwd == null ? "–" : r.mean_fwd}</td><td class="num">${r.pct_up == null ? "–" : r.pct_up + "%"}</td></tr>`).join("");
+  const hm = t => { const x = new Date(t + 19800e3); return ("0" + x.getUTCHours()).slice(-2) + ":" + ("0" + x.getUTCMinutes()).slice(-2) + ":" + ("0" + x.getUTCSeconds()).slice(-2); };
+  $("stSp").querySelector("tbody").innerHTML = d.spikes.map(r => `<tr><td>${hm(r.t)}</td><td class="num">${fmtN(r.vol)}</td><td class="num">${r.x_avg}x</td><td class="num bidc">${fmtN(r.buyv)}</td><td class="num askc">${fmtN(r.sellv)}</td>
+    <td class="num ${cls(r.move)}">${r.move}</td><td class="num">${r.imb}</td><td class="num ${cls(r.fwd)}">${r.fwd == null ? "–" : r.fwd}</td></tr>`).join("") || '<tr><td colspan="8" class="muted">No bucket stood out yet (a spike is more than 2 standard deviations above the average bucket).</td></tr>';
+}
+$("stH").addEventListener("change", loadStats);
 const cvEl = $("cv");
 cvEl.addEventListener("mousemove", e => {
   if (!series || !series.length) return;
@@ -166,7 +202,7 @@ cvEl.addEventListener("mousemove", e => {
   const t = t0 + (x - PAD.l) / (W - PAD.l - PAD.r) * (t1 - t0), p = series.find(q => t >= q.t && t < q.t + bms);
   const tip = $("tip"); if (!p) { tip.style.display = "none"; return; }
   const d = new Date(p.t + 19800e3), hh = ("0" + d.getUTCHours()).slice(-2) + ":" + ("0" + d.getUTCMinutes()).slice(-2) + ":" + ("0" + d.getUTCSeconds()).slice(-2);
-  tip.innerHTML = `<b>${hh}</b> · ${p.n} updates<br>O ${p.o} H ${p.h} L ${p.l} C ${p.c}<br>volume <b>${fmtN(p.vol)}</b><br>bid ${p.bid} × ${fmtN(p.b1q)} · offer ${p.ask} × ${fmtN(p.a1q)}<br>
+  tip.innerHTML = `<b>${hh}</b> · ${p.n} updates<br>O ${p.o} H ${p.h} L ${p.l} C ${p.c}<br>volume <b>${fmtN(p.vol)}</b> (buy-aggr <span class="bidc">${fmtN(p.buyv)}</span> / sell-aggr <span class="askc">${fmtN(p.sellv)}</span>)<br>bid ${p.bid} × ${fmtN(p.b1q)} · offer ${p.ask} × ${fmtN(p.a1q)}<br>
     5-level bid <span class="bidc">${fmtN(p.bid5)}</span> vs offer <span class="askc">${fmtN(p.ask5)}</span><br>imbalance <b>${p.imb}</b>`;
   tip.style.display = "block"; tip.style.left = Math.min(x + 14, W - 230) + "px"; tip.style.top = "30px";
 });

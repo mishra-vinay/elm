@@ -9,6 +9,7 @@ from dryrun import levels
 from dryrun.app import create_app
 from dryrun.config import Settings
 from dryrun.db import Candle, init_db
+from dryrun.dhan_rest import DhanError
 from dryrun.history import backfill, store_candles
 from dryrun.sim_feed import ReplayFeed
 
@@ -221,3 +222,57 @@ def test_stored_timestamps_are_ist_even_when_the_server_clock_is_utc(tmp_path, m
     finally:
         monkeypatch.undo()
         _t.tzset()
+
+
+def test_a_candle_written_by_the_live_collector_during_a_download_does_not_fail_it(factory, monkeypatch):
+    from sqlalchemy.orm import Session
+    i = instr.search(factory, "BAJFINANCE", 1)[0]
+    t0 = datetime(2026, 10, 9, 10, 0)
+    rows = [{"ts": t0 + timedelta(minutes=k), "open": 1, "high": 2, "low": 1, "close": 2, "volume": 5} for k in range(4)]
+    real, state = Session.commit, {"hit": False}
+
+    def flaky(self):
+        if not state["hit"]:                  # the live collector writes one of these minutes just before the download's commit
+            state["hit"] = True
+            with factory() as other:
+                other.add(Candle(instrument_id=i.id, interval="1m", ts=rows[2]["ts"], open=9, high=9, low=9, close=9, volume=1, source="live"))
+                other.commit()
+        return real(self)
+
+    monkeypatch.setattr(Session, "commit", flaky)
+    assert store_candles(factory, i.id, "1m", rows, "api") == 4               # the repeat inserts three and replaces the live candle with the official one
+    with factory() as s:
+        got = s.scalars(select(Candle).where(Candle.instrument_id == i.id, Candle.interval == "1m").order_by(Candle.ts)).all()
+    assert len(got) == 4 and all(c.source == "api" for c in got) and got[2].close == 2
+
+
+def test_a_contract_with_no_candles_yet_is_an_empty_result_not_a_failure(factory):
+    i = instr.search(factory, "BAJFINANCE", 1)[0]
+
+    class NoData(FakeRest):
+        def daily(self, *a, **k):
+            raise DhanError('/charts/historical HTTP 400: {"errorType":"Data_Error","errorCode":"DH-907","errorMessage":"no data present"}')
+
+        def intraday(self, *a, **k):
+            raise DhanError('/charts/intraday HTTP 400: {"errorCode":"DH-907"}')
+
+    out = backfill(factory, NoData(), i, intraday_days=30)
+    assert out["daily"] == 0 and out["intraday"] == 0
+
+    class Broken(FakeRest):
+        def daily(self, *a, **k):
+            raise DhanError("/charts/historical HTTP 401: invalid token")
+
+    with pytest.raises(DhanError):                                             # any other Dhan error is still reported
+        backfill(factory, Broken(), i, intraday_days=30)
+
+
+def test_a_download_that_repeats_a_timestamp_stores_one_row_for_it(factory):
+    i = instr.search(factory, "BAJFINANCE", 1)[0]
+    d = datetime(2026, 10, 9)
+    rows = [{"ts": d, "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 1}, {"ts": d + timedelta(days=1), "open": 2, "high": 3, "low": 2, "close": 2.5, "volume": 1},
+            {"ts": d, "open": 5, "high": 6, "low": 5, "close": 5.5, "volume": 9}]                 # the first day twice, as on a roll-over day
+    assert store_candles(factory, i.id, "D", rows, "api") == 2
+    with factory() as s:
+        got = {c.ts: c for c in s.scalars(select(Candle).where(Candle.instrument_id == i.id, Candle.interval == "D"))}
+    assert len(got) == 2 and got[d].close == 5.5                                                   # the later row wins

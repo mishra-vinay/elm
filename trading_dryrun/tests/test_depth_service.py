@@ -32,6 +32,9 @@ def test_targets_series_days_export(tmp_path):
         s = svc.series("574320", day, 30)["points"]
         assert len(s) == 4 and s[0]["o"] == 290 and s[0]["c"] == 291 and s[0]["bid5"] == 64 and s[0]["ask5"] == 68
         assert s[1]["vol"] == 10 and s[0]["imb"] == round((64 - 68) / 132, 4)
+        assert 'buyv' in s[0] and 'sellv' in s[0]
+        st = svc.stats('574320', day, 30, 1)
+        assert st['buckets'] == 4 and st['summary']['volume'] >= 0 and len(st['imbalance']) == 5
         c, cur, header = svc.export_rows("574320", day)
         assert header[0] == "recv_ts" and len(cur.fetchall()) == 6
         c.close()

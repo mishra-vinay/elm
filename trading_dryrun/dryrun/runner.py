@@ -10,6 +10,7 @@ import asyncio
 import logging
 import threading
 import queue
+import time as _time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -21,15 +22,17 @@ from sqlalchemy.orm import sessionmaker
 from . import levels as levels_mod
 from .candles import MinuteAggregator
 from .config import Settings, session_for
-from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, Watch, now_ist, purge_old_ticks
+from .db import ApiLog, Candle, Instrument, RiskLog, Run, Signal, Tick, Trade, Watch, get_setting, now_ist, purge_old_ticks
 from .dhan_feed import FeedNote, FeedTick
 from .history import backfill, store_live_bar
 from .risk import RiskContext, RiskEngine
-from .strategy import BreakoutPullbackEngine, Event, Params
+from .strategy import Event, Params, StrategyEngine, get_strategy, make_engine
 
 log = logging.getLogger("dryrun.runner")
 MAX_ACTIVE_RUNS = 20
-MAX_JUMP = 0.20          # a single tick moving more than 20% from the previous one is treated as bad data
+MAX_JUMP = 0.20          # a tick more than 20% away from the last accepted price is held back until the NEXT distinct tick
+                         # confirms it (a real gap or split-day move) or contradicts it (a bad print, which is then dropped)
+EPOCH = datetime(1970, 1, 1)
 
 
 class LevelsNeeded(Exception):
@@ -88,6 +91,27 @@ class InstState:
     minutes_seen: set = field(default_factory=set)
     bad_ticks: int = 0
     watch: bool = False                    # collect-only subscription
+    # --- feed quality, per instrument (shown on the Ticks page) ---
+    day: date | None = None                # trading day of the data held here; everything resets when it changes
+    last_ltt: int | None = None
+    last_vol: int | None = None
+    last_key: tuple | None = None          # (ltp, ltt, volume) of the last accepted packet
+    pending: tuple | None = None           # (FeedTick, ts): a >20% jump waiting for confirmation
+    prev_msg_at: datetime | None = None    # arrival of the packet BEFORE the current one (any packet, even a skipped duplicate)
+    last_msg_at: datetime | None = None    # arrival of the latest packet: this is "is the feed alive for this instrument"
+    packets: int = 0
+    accepted: int = 0
+    dup_skipped: int = 0
+    old_skipped: int = 0
+    jump_confirmed: int = 0
+    day_high: float | None = None
+    day_low: float | None = None
+    volume: int | None = None
+    rate: deque = field(default_factory=lambda: deque(maxlen=4000))       # epoch seconds of every packet (for packets/s)
+    lat: deque = field(default_factory=lambda: deque(maxlen=200))         # arrival minus exchange last-trade time, seconds
+    proc: deque = field(default_factory=lambda: deque(maxlen=2000))       # microseconds spent in our code per packet
+    proc_max_us: float = 0.0
+    tail: deque = field(default_factory=lambda: deque(maxlen=25))         # newest accepted ticks, for the Ticks page
 
 
 @dataclass
@@ -95,7 +119,7 @@ class LiveRun:
     id: int
     inst: Instrument
     params: Params
-    engine: BreakoutPullbackEngine
+    engine: StrategyEngine
     trading_date: date
     levels: levels_mod.Levels
     open_t: time
@@ -127,8 +151,6 @@ class RunManager:
         self.runs: dict[int, LiveRun] = {}
         self.lock = threading.RLock()
         self._tick_buf: list[Tick] = []
-        self._cur_msg: datetime | None = None
-        self._prev_msg: datetime | None = None
         self._task: asyncio.Task | None = None
         self._last_purge = datetime.min
         self._last_update: date | None = None
@@ -136,11 +158,7 @@ class RunManager:
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self):
-        with self.factory() as s:       # runs that were live when the process died cannot be resumed
-            s.execute(update(Run).where(Run.status.in_(("starting", "waiting", "running"))).values(
-                status="interrupted", ended_at=now_ist(), ran_ok=False,
-                error="process restarted while the run was live; ticks up to that point are stored"))
-            s.commit()
+        self._close_orphans()
         self.feed = self.feed_factory(self._on_tick, self._on_note, self._on_status)
         await self.feed.start()
         with self.factory() as s:                                   # live collection survives restarts
@@ -150,6 +168,35 @@ class RunManager:
                 self.states[key] = InstState(inst, watch=True)
                 await self.feed.subscribe([key])
         self._task = asyncio.create_task(self._supervisor(), name="supervisor")
+
+    def _close_orphans(self):
+        """Runs that were live when the process died cannot be resumed. Any simulated position they still had open is closed
+        at the run's last stored price (reason 'interrupted'), so no trade stays open forever and the P&L is not lost."""
+        with self.factory() as s:
+            live = s.scalars(select(Run).where(Run.status.in_(("starting", "waiting", "running")))).all()
+            for run in live:
+                prm = run.params or {}
+                closed = []
+                for t in s.scalars(select(Trade).where(Trade.run_id == run.id, Trade.exit_ts.is_(None))):
+                    px = run.last_price
+                    t.exit_ts, t.exit_reason = now_ist(), "interrupted"
+                    if px:
+                        buy = t.side == "BUY"
+                        slip = px * float(prm.get("slippage_pct", 0.0)) / 100
+                        t.exit_price = px - slip if buy else px + slip
+                        t.gross_pnl = (1 if buy else -1) * (t.exit_price - t.entry_price) * t.qty
+                        t.cost = t.entry_price * t.qty * float(prm.get("cost_pct", 0.0)) / 100
+                        t.net_pnl = t.gross_pnl - t.cost
+                        t.net_pct = t.net_pnl / (t.entry_price * t.qty) * 100
+                    closed.append(t)
+                note = "process restarted while the run was live; ticks up to that point are stored"
+                if closed:
+                    note += (f"; {len(closed)} open simulated trade(s) closed at the last stored price {run.last_price}" if run.last_price
+                             else f"; {len(closed)} open simulated trade(s) flagged 'interrupted' (no price stored, P&L unknown)")
+                    s.add(ApiLog(source="run", level="warn", message=f"[run #{run.id}] {note}"[:500]))
+                run.status, run.ended_at, run.ran_ok, run.error = "interrupted", now_ist(), False, note
+                run.summary = {**(run.summary or {}), "interrupted": True, "open_trades_closed": len(closed)}
+            s.commit()
 
     async def stop(self):
         for rid in list(self.runs):
@@ -173,30 +220,85 @@ class RunManager:
             st.prev_close = n.value
 
     def _on_tick(self, ft: FeedTick):
+        t0 = _time.perf_counter()
         with self.lock:
             st = self.states.get((ft.segment, ft.security_id))
             if st is None or not (ft.ltp and ft.ltp > 0):
                 return
-            ts = ft.recv_ts or self.clock()
-            if st.last_price and abs(ft.ltp / st.last_price - 1) > MAX_JUMP:
-                st.bad_ticks += 1
-                self.writer.submit(lambda s: s.add(ApiLog(source="feed", level="warn",
-                                                          message=f"bad tick dropped {st.inst.symbol}: {st.last_price} -> {ft.ltp}")))
+            try:
+                self._process_packet(st, ft)
+            finally:
+                us = (_time.perf_counter() - t0) * 1e6
+                st.proc.append(us)
+                st.proc_max_us = max(st.proc_max_us, us)
+
+    def _process_packet(self, st: InstState, ft: FeedTick):
+        ts = ft.recv_ts or self.clock()
+        # liveness is per instrument and counts EVERY packet (even a duplicate we then skip): it is what the stale-feed check uses
+        st.prev_msg_at, st.last_msg_at = st.last_msg_at, ts
+        st.packets += 1
+        st.rate.append(_time.time())
+        if st.day != ts.date():                       # new trading day: nothing from yesterday may judge today's ticks
+            st.day, st.last_price, st.last_ltt, st.last_vol, st.last_key, st.pending = ts.date(), None, None, None, None, None
+            st.ticks_today, st.minutes_seen = 0, set()
+        if ft.ltt:
+            lat = (ts - (EPOCH + timedelta(seconds=ft.ltt))).total_seconds()       # ltt is Unix seconds read as IST wall clock
+            if -5 < lat < 3600:
+                st.lat.append(lat)
+        key = (ft.ltp, ft.ltt, ft.volume)
+        if ft.ltt is not None:
+            # a packet older than one already processed (the feed can deliver them out of order) would move the price backwards
+            if st.last_ltt is not None and (ft.ltt < st.last_ltt or (
+                    ft.ltt == st.last_ltt and ft.volume is not None and st.last_vol is not None and ft.volume < st.last_vol)):
+                st.old_skipped += 1
                 return
-            self._prev_msg, self._cur_msg = self._cur_msg, ts
-            st.last_price, st.last_tick_at = ft.ltp, ts
-            st.ticks_today += 1
-            if st.ticks_today == 1:
-                self.activity("feed", "info", f"First price for {st.inst.symbol}: {ft.ltp:,.2f}")
-            st.minutes_seen.add(ts.replace(second=0, microsecond=0))
-            if self.s.store_ticks:
-                self._tick_buf.append({"instrument_id": st.inst.id, "ts": ts, "ltp": ft.ltp, "ltt": ft.ltt, "volume": ft.volume,
-                                       "day_high": ft.day_high, "day_low": ft.day_low})
-            bar = st.agg.add(ts, ft.ltp, ft.volume)
-            if bar is not None:
-                self._store_bar(st.inst.id, bar)
-            for run in [r for r in self.runs.values() if r.inst.id == st.inst.id and not r.closed]:
-                self._run_tick(run, ts, ft.ltp)
+            if key == st.last_key or (st.pending is not None and key == self._key(st.pending[0])):
+                st.dup_skipped += 1              # the quote feed repeats identical snapshots on every depth change
+                return
+        if st.pending is not None:
+            pft, pts = st.pending
+            st.pending = None
+            if abs(ft.ltp / pft.ltp - 1) <= MAX_JUMP:          # the next distinct tick agrees: the big move was real
+                st.jump_confirmed += 1
+                self.activity("feed", "warn", f"large move confirmed {st.inst.symbol}: {st.last_price} -> {pft.ltp}")
+                self._accept(st, pft, pts)
+            else:                                              # the next tick is back near the old price: the jump was a bad print
+                st.bad_ticks += 1
+                self.writer.submit(lambda s, a=st.last_price, b=pft.ltp, sym=st.inst.symbol: s.add(
+                    ApiLog(source="feed", level="warn", message=f"bad tick dropped {sym}: {a} -> {b}")))
+        if st.last_price and abs(ft.ltp / st.last_price - 1) > MAX_JUMP:
+            st.pending = (ft, ts)                 # hold it; the next distinct tick decides
+            return
+        self._accept(st, ft, ts)
+
+    @staticmethod
+    def _key(ft: FeedTick) -> tuple:
+        return (ft.ltp, ft.ltt, ft.volume)
+
+    def _accept(self, st: InstState, ft: FeedTick, ts: datetime):
+        st.last_price, st.last_tick_at = ft.ltp, ts
+        st.last_key = self._key(ft)
+        if ft.ltt is not None:
+            st.last_ltt = ft.ltt
+        if ft.volume is not None:
+            st.last_vol = ft.volume
+            st.volume = ft.volume
+        st.day_high = ft.day_high or st.day_high
+        st.day_low = ft.day_low or st.day_low
+        st.accepted += 1
+        st.ticks_today += 1
+        st.tail.appendleft((ts.strftime("%H:%M:%S"), ft.ltp, ft.volume))
+        if st.ticks_today == 1:
+            self.activity("feed", "info", f"First price for {st.inst.symbol}: {ft.ltp:,.2f}")
+        st.minutes_seen.add(ts.replace(second=0, microsecond=0))
+        if self.s.store_ticks:
+            self._tick_buf.append({"instrument_id": st.inst.id, "ts": ts, "ltp": ft.ltp, "ltt": ft.ltt, "volume": ft.volume,
+                                   "day_high": ft.day_high, "day_low": ft.day_low})
+        bar = st.agg.add(ts, ft.ltp, ft.volume)
+        if bar is not None:
+            self._store_bar(st.inst.id, bar)
+        for run in [r for r in self.runs.values() if r.inst.id == st.inst.id and not r.closed]:
+            self._run_tick(run, ts, ft.ltp)
 
     def _store_bar(self, instrument_id: int, bar):
         source = "sim" if self.s.feed_mode == "sim" else "live"       # simulated prices must never pass as market data
@@ -232,14 +334,8 @@ class RunManager:
         self.activity("run", level, f"[{run.inst.symbol} #{run.id}{(' ' + run.label) if run.label else ''}] {text}")
 
     def _describe(self, run: LiveRun, ev: Event) -> str | None:
-        e, p = run.engine, ev.price
-        if ev.kind == "break":
-            up = ev.side == "BUY"
-            return (f"Price {p:,.2f} broke {'above the previous High' if up else 'below the previous Low'} "
-                    f"({run.levels.high if up else run.levels.low:,.2f}). Waiting for a pullback to "
-                    f"{'<= ' + format(e.buy_entry_level, ',.2f') if up else '>= ' + format(e.sell_entry_level, ',.2f')} to take a {ev.side}.")
-        if ev.kind == "entry_signal":
-            return f"Pullback reached at {p:,.2f}: {ev.side} signal."
+        if ev.kind == "note":                              # a plain sentence from the strategy
+            return run.engine.describe_event(ev)
         if ev.kind == "entry_skipped":
             return f"{ev.side} signal NOT taken: {ev.reason}."
         if ev.kind == "entry":
@@ -249,7 +345,10 @@ class RunManager:
         if ev.kind == "exit":
             t = ev.trade
             return f"SIMULATED exit ({ev.reason}) at {t['exit_price']:,.2f}: net Rs {t['net_pnl']:,.2f} ({t['net_pct']:+.2f}%)."
-        return None
+        text = run.engine.describe_event(ev)              # the strategy's own wording for its signals and notes
+        if ev.kind == "entry_signal":
+            return f"{ev.side} signal at {ev.price:,.2f}" + (f": {text}" if text else ".")
+        return f"{ev.side} {ev.kind} at {ev.price:,.2f}" + (f": {text}" if text else ".")
 
     def _handle(self, run: LiveRun, events: list[Event]):
         for ev in events:
@@ -258,8 +357,8 @@ class RunManager:
                 self._log(run, text, ev.ts)
             run.events.appendleft({"ts": ev.ts.strftime("%H:%M:%S"), "kind": ev.kind, "side": ev.side,
                                    "price": round(ev.price, 4), "reason": ev.reason})
-            if ev.kind == "break":
-                self._signal(run, ev, "break", "info", ev.reason)
+            if ev.kind not in ("entry_signal", "entry_skipped", "entry", "exit"):
+                self._signal(run, ev, ev.kind[:8], "info", ev.reason)          # a note from the strategy (e.g. a break), stored as an info signal
             elif ev.kind == "entry_signal":
                 run.pending_signal = {"ev": ev}
             elif ev.kind == "entry_skipped":
@@ -314,9 +413,17 @@ class RunManager:
                         asyncio.get_running_loop().run_in_executor(None, self.update_history_now)
                     if (now - self._last_purge) > timedelta(hours=6):
                         self._last_purge = now
-                        asyncio.get_running_loop().run_in_executor(None, purge_old_ticks, self.factory, self.s.tick_retention_days)
+                        asyncio.get_running_loop().run_in_executor(None, purge_old_ticks, self.factory, self.retention_days())
         except asyncio.CancelledError:
             pass
+
+    def retention_days(self) -> int:
+        """Days of raw ticks to keep: the value saved on the Settings page, else TICK_RETENTION_DAYS from .env."""
+        try:
+            v = get_setting(self.factory, "tick_retention_days")
+            return max(1, int(v)) if v is not None else self.s.tick_retention_days
+        except Exception:      # noqa: BLE001
+            return self.s.tick_retention_days
 
     def finalize(self, run: LiveRun, status: str, reason: str):
         if run.closed:
@@ -389,11 +496,29 @@ class RunManager:
         def approve(side, ts, price, state):
             return holder["risk"].approve(side, ts, price, state)
 
-        engine = BreakoutPullbackEngine(lv.high, lv.low, params, approve=approve)
+        engine = make_engine(lv.high, lv.low, params, approve=approve)
+        engine.session_open = open_t
+        engine.symbol = inst.symbol
+        mid_session = trading_date == now.date() and now >= datetime.combine(trading_date, open_t) + timedelta(minutes=1)
+        day_open_note = None
+        if mid_session:             # started after the open: the first price seen is not the day's open, so look the opening price up
+            op, src = await asyncio.get_running_loop().run_in_executor(None, self._day_open, inst, trading_date, open_t)
+            if op:
+                engine.day_open = op
+                day_open_note = f"Day open {op:,.2f} (from the {src})."
+            else:
+                day_open_note = "The day's opening price could not be found, so the first price seen is used as the day open (any day-open filter may be wrong for this run)."
         live = LiveRun(run_id, inst, params, engine, trading_date, lv, open_t, last_entry_t, squareoff_t, label=label or "",
                        started_disconnects=getattr(self.feed, "disconnects", 0) or 0)
+        ikey = (inst.segment, inst.security_id)
+
+        def _st():
+            return self.states.get(ikey)
+
         holder["risk"] = RiskEngine(RiskContext(
-            last_tick_at=lambda: self._prev_msg, now=lambda: self._cur_msg or self.clock(), last_entry_time=last_entry_t,
+            # this instrument's previous packet vs this packet: a silent instrument is stale even while others keep ticking
+            last_tick_at=lambda: getattr(_st(), "prev_msg_at", None), now=lambda: getattr(_st(), "last_msg_at", None) or self.clock(),
+            last_entry_time=last_entry_t,
             session_open=open_t, stale_seconds=self.s.stale_tick_seconds, ignore_hours=self.s.ignore_market_hours,
             log=lambda check, ok, detail: self._risk_log(run_id, inst.symbol, check, ok, detail)))
         with self.lock:
@@ -403,15 +528,37 @@ class RunManager:
                 self.states[key] = InstState(inst)
         if trading_date > now.date():
             self._log(live, f"The market is closed now. This run is scheduled for {trading_date:%A %d %b %Y} and starts watching at {open_t:%H:%M} IST. Keep the app running until then.")
-        self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}{', day ' + str(lv.from_date) if lv.from_date else ''}). "
-                        f"Pullback {params.pullback_pct}%, target {params.target_pct}%, stop "
-                        f"{'none' if params.stop_pct is None else str(params.stop_pct) + '%'}.")
+        spec = get_strategy(params.strategy)
+        desc = spec.describe(lv.high, lv.low, params.options) if spec.describe else f"Strategy: {spec.label}."
+        self._log(live, f"Run started. Previous-day High {lv.high:,.2f}, Low {lv.low:,.2f} (source: {lv.source}{', day ' + str(lv.from_date) if lv.from_date else ''}). " + desc)
+        if day_open_note:
+            self._log(live, day_open_note)
         await self.feed.subscribe([key])
         self._log(live, f"Subscribed to {inst.label}. Waiting for prices.")
         if hasattr(self.feed, "set_start_price"):       # simulated feed: start in the middle of yesterday's range
             self.feed.set_start_price(key, (lv.high + lv.low) / 2)
         return {"id": run_id, "levels": {"high": lv.high, "low": lv.low, "source": lv.source},
                 "trading_date": trading_date.isoformat(), "scheduled": trading_date > now.date()}
+
+    def _day_open(self, inst: Instrument, trading_date: date, open_t: time) -> tuple[float | None, str | None]:
+        """The session's opening price: the first stored 1m/5m candle of the day, else Dhan's 1-minute candles for today. A candle that starts
+        more than 10 minutes after the open is not the opening candle (collection started late), so it is not used."""
+        lo = datetime.combine(trading_date, open_t)
+        with self.factory() as s:
+            for iv in ("1m", "5m"):
+                row = s.execute(select(Candle.ts, Candle.open).where(
+                    Candle.instrument_id == inst.id, Candle.interval == iv, Candle.source != "sim", Candle.ts >= lo,
+                    Candle.ts < lo + timedelta(days=1)).order_by(Candle.ts).limit(1)).first()
+                if row and row.ts - lo <= timedelta(minutes=10):
+                    return float(row.open), f"stored {iv} candle of {row.ts:%H:%M}"
+        if self.rest is not None:
+            try:
+                rows = [r for r in self.rest.intraday(inst.segment, inst.security_id, inst.instrument, 1, trading_date, trading_date) if r["ts"] >= lo]
+                if rows and rows[0]["ts"] - lo <= timedelta(minutes=10):
+                    return float(rows[0]["open"]), f"Dhan 1-minute candle of {rows[0]['ts']:%H:%M}"
+            except Exception as e:      # noqa: BLE001
+                log.warning("day open lookup failed for %s: %s", inst.symbol, e)
+        return None, None
 
     def _risk_log(self, run_id: int, symbol: str, check: str, ok: bool, detail: str):
         self.writer.submit(lambda s: s.add(RiskLog(run_id=run_id, check=check, approved=ok, detail=detail[:200])))
@@ -520,17 +667,63 @@ class RunManager:
             return f"{prefix}Max trades per day reached ({done}). No new entries; waiting for square-off."
         if r.params.daily_loss_limit_pct is not None and e.net_pct_sum <= -r.params.daily_loss_limit_pct:
             return f"{prefix}Daily loss limit reached. No new entries."
-        notes = []
-        if e.armed["BUY"]:
-            notes.append(f"Price broke above the previous High ({r.levels.high:,.2f}); waiting for a pullback to {e.buy_entry_level:,.2f} or lower to BUY (now {p:,.2f}).")
-        if e.armed["SELL"]:
-            notes.append(f"Price broke below the previous Low ({r.levels.low:,.2f}); waiting for a pullback to {e.sell_entry_level:,.2f} or higher to SELL (now {p:,.2f}).")
-        if notes:
-            return prefix + " ".join(notes)
-        up_pct, dn_pct = (e.break_up_level / p - 1) * 100, (1 - e.break_down_level / p) * 100
+        own = e.status_text(p)                              # what the strategy is waiting for
         where = "inside" if r.levels.low <= p <= r.levels.high else "outside"
-        return (f"{prefix}Price {p:,.2f} is {where} yesterday's range ({r.levels.low:,.2f} to {r.levels.high:,.2f}). "
-                f"A setup starts if it trades above {e.break_up_level:,.2f} ({up_pct:+.2f}%) or below {e.break_down_level:,.2f} ({-dn_pct:+.2f}%).")
+        return f"{prefix}Price {p:,.2f} is {where} yesterday's range ({r.levels.low:,.2f} to {r.levels.high:,.2f}). " + (own or "Watching the market.")
+
+    def ticks_snapshot(self) -> dict:
+        """Everything the Ticks page shows: feed health plus, per instrument, rates, quality counters, latency and our own processing time."""
+        now, nowt = self.clock(), _time.time()
+        feed = self.feed
+        stale = self.s.stale_tick_seconds
+        rows = []
+        with self.lock:
+            for key, st in self.states.items():
+                age = None if st.last_msg_at is None else max(0.0, (now - st.last_msg_at).total_seconds())
+                seg = st.inst.segment
+                o, _e, _sq, c = session_for(seg)
+                open_now = self.s.ignore_market_hours or (o <= now.time() < c and now.weekday() < 5)
+                if st.packets == 0:
+                    status = "waiting" if open_now else "market closed"
+                elif not open_now and (age is None or age > stale):
+                    status = "market closed"
+                elif age is not None and age <= stale:
+                    status = "receiving"
+                else:
+                    status = "silent"
+                rate = [t for t in st.rate if nowt - t <= 60]
+                r10 = sum(1 for t in rate if nowt - t <= 10)
+                persec = [0] * 60
+                for t in rate:
+                    persec[59 - min(59, int(nowt - t))] += 1
+                lat = sorted(st.lat)
+                proc = sorted(st.proc)
+                pq = lambda q: round(proc[min(len(proc) - 1, int(q * len(proc)))], 1) if proc else None      # noqa: E731
+                rows.append({
+                    "key": f"{key[0]}:{key[1]}", "instrument": st.inst.label, "symbol": st.inst.symbol, "segment": seg,
+                    "kind": "dry run" if any((r.inst.segment, r.inst.security_id) == key for r in self.runs.values())
+                    else ("recording" if st.watch else "—"),
+                    "runs": [r.id for r in self.runs.values() if (r.inst.segment, r.inst.security_id) == key],
+                    "status": status, "last_price": st.last_price, "day_high": st.day_high, "day_low": st.day_low, "volume": st.volume,
+                    "age": None if age is None else round(age, 1), "rate10": round(r10 / 10, 1), "rate60": round(len(rate) / 60, 1),
+                    "persec": persec, "packets": st.packets, "accepted": st.accepted, "dup": st.dup_skipped, "old": st.old_skipped,
+                    "bad": st.bad_ticks, "jump_confirmed": st.jump_confirmed, "held": st.pending is not None,
+                    "lat_min": round(lat[0], 2) if lat else None, "lat_med": round(lat[len(lat) // 2], 2) if lat else None,
+                    "proc_avg_us": round(sum(proc) / len(proc), 1) if proc else None, "proc_p99_us": pq(0.99), "proc_max_us": round(st.proc_max_us, 1),
+                    "tail": [{"t": t, "ltp": p, "vol": v} for t, p, v in list(st.tail)[:12]]})
+            known = set(self.states)
+        extra = [f"{a}:{b}" for a, b in sorted(getattr(feed, "subscribed", set())) if (a, b) not in known]
+        return {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "mode": self.s.feed_mode, "stale_seconds": stale, "instruments": rows,
+                "subscribed_idle": extra,
+                "feed": {"connected": bool(getattr(feed, "connected", False)), "fatal": getattr(feed, "fatal", None),
+                         "disconnects": getattr(feed, "disconnects", 0), "subscribed": len(getattr(feed, "subscribed", [])),
+                         "packet": getattr(feed, "packet", self.s.feed_packet), "ping_interval": getattr(feed, "ping_interval", None),
+                         "ping_timeout": getattr(feed, "ping_timeout", None), "rtt_ms": getattr(feed, "rtt_ms", None),
+                         "last_message_age": None if not getattr(feed, "last_message_at", None) else round((now - feed.last_message_at).total_seconds(), 1)},
+                "writer_queue": self.writer.q.qsize(), "writer_errors": self.writer.errors, "store_ticks": self.s.store_ticks,
+                "retention_days": self.retention_days(),
+                "rest": {"configured": self.rest is not None, "last_latency_ms": None if self.rest is None else (round(self.rest.last_latency_ms) if self.rest.last_latency_ms else None)},
+                "notes": [(t.strftime("%H:%M:%S"), l, m) for t, l, m in list(self.notes)[:12]]}
 
     def status_snapshot(self) -> dict:
         """Cheap version of snapshot() for the header badges that every page polls."""
@@ -556,9 +749,7 @@ class RunManager:
                 runs.append({
                     "id": r.id, "label": r.label, "instrument": r.inst.label, "symbol": r.inst.symbol, "status": r.status,
                     "high": r.levels.high, "low": r.levels.low, "levels_source": r.levels.source + (f" {r.levels.from_date}" if r.levels.from_date else ""),
-                    "buy_trigger": e.buy_entry_level, "sell_trigger": e.sell_entry_level,
-                    "break_up": e.break_up_level, "break_down": e.break_down_level,
-                    "armed_buy": e.armed["BUY"], "armed_sell": e.armed["SELL"],
+                    "strategy": r.params.strategy, "levels": e.levels(), "flags": dict(e.flags),
                     "last_price": r.last_price, "ticks": r.ticks,
                     "last_tick_age": None if r.last_tick is None else round((now - r.last_tick).total_seconds(), 1),
                     "position": None if pos is None else {"side": pos.side, "entry": pos.entry_price, "target": pos.target,
@@ -567,7 +758,7 @@ class RunManager:
                     "status_text": self._status_text(r, now), "log": list(r.log)[:40], "trading_date": r.trading_date.isoformat(),
                     "params": r.params.as_dict(), "squareoff": r.squareoff_t.strftime("%H:%M")})
             watch = [{"instrument": st.inst.label, "last_price": st.last_price, "ticks": st.ticks_today,
-                      "prev_close": st.prev_close, "bad_ticks": st.bad_ticks} for st in self.states.values()
+                      "prev_close": st.prev_close, "bad_ticks": st.bad_ticks, "duplicates_skipped": st.dup_skipped} for st in self.states.values()
                      if st.watch]
         feed = self.feed
         return {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "mode": self.s.feed_mode,

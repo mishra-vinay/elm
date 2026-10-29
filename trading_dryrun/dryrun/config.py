@@ -34,7 +34,7 @@ SESSIONS = {
     "BSE_EQ": (time(9, 15), time(15, 0), time(15, 15), time(15, 30)),
     "NSE_FNO": (time(9, 15), time(15, 0), time(15, 15), time(15, 30)),
     "BSE_FNO": (time(9, 15), time(15, 0), time(15, 15), time(15, 30)),
-    "MCX_COMM": (time(9, 0), time(23, 0), time(23, 15), time(23, 30)),
+    "MCX_COMM": (time(9, 0), time(23, 0), time(23, 20), time(23, 30)),
 }
 
 
@@ -55,7 +55,7 @@ class Settings:
     allowed_emails: tuple = field(default_factory=lambda: tuple(
         e.strip().lower() for e in _get("ALLOWED_EMAILS", "").split(",") if e.strip()))
     store_ticks: bool = field(default_factory=lambda: _bool("STORE_TICKS", True))
-    tick_retention_days: int = field(default_factory=lambda: int(_get("TICK_RETENTION_DAYS", "30")))
+    tick_retention_days: int = field(default_factory=lambda: int(_get("TICK_RETENTION_DAYS", "3")))
     # Simulated feed has no market hours; real feeds are gated by SESSIONS.
     ignore_market_hours: bool = field(default_factory=lambda: _bool("IGNORE_MARKET_HOURS", False))
     sim_ticks_per_second: float = field(default_factory=lambda: float(_get("SIM_TICKS_PER_SECOND", "5")))

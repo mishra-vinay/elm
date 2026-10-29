@@ -287,12 +287,19 @@ class DepthService:
                 "      FROM depth WHERE sid=? AND recv_ms>=? AND recv_ms<? GROUP BY k) g "
                 "JOIN depth o ON o.id=g.i0 JOIN depth e ON e.id=g.i1 ORDER BY g.k",
                 (ms, str(sid), max(lo, since_ms), hi)).fetchall()
+            agg = {r["k"]: (r["bv"] or 0, r["sv"] or 0) for r in c.execute(
+                "SELECT recv_ms/? AS k, SUM(CASE WHEN dv>0 AND ltp>=pa THEN dv END) bv, SUM(CASE WHEN dv>0 AND NOT (ltp>=pa) AND ltp<=pb THEN dv END) sv "
+                "FROM (SELECT recv_ms, ltp, vm-LAG(vm) OVER w AS dv, LAG(a1p) OVER w AS pa, LAG(b1p) OVER w AS pb "
+                "      FROM (SELECT id, recv_ms, ltp, a1p, b1p, MAX(volume) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) AS vm FROM depth "
+                "            WHERE sid=? AND recv_ms>=? AND recv_ms<?) WINDOW w AS (ORDER BY id)) GROUP BY k",
+                (ms, str(sid), max(lo, since_ms), hi))}
         out, prev = [], base
         for r in rows:
             v = None if r["vmax"] is None else (r["vmax"] - prev if prev is not None else None)
             prev = r["vmax"] if r["vmax"] is not None else prev
             b5, a5 = r["bid5"] or 0, r["ask5"] or 0
-            out.append({"t": r["k"] * ms, "o": r["o"], "h": r["hi"], "l": r["lo"], "c": r["c"], "vol": v, "cumvol": r["vmax"], "n": r["n"],
+            bv, sv = agg.get(r["k"], (0, 0))
+            out.append({"t": r["k"] * ms, "buyv": bv, "sellv": sv, "o": r["o"], "h": r["hi"], "l": r["lo"], "c": r["c"], "vol": v, "cumvol": r["vmax"], "n": r["n"],
                         "bid": r["b1p"], "ask": r["a1p"], "b1q": r["b1q"], "a1q": r["a1q"], "bid5": b5, "ask5": a5,
                         "imb": round((b5 - a5) / (b5 + a5), 4) if b5 + a5 else 0.0, "tot_buy": r["tot_buy"], "tot_sell": r["tot_sell"], "oi": r["oi"]})
         return {"bucket": bucket, "points": out}
@@ -306,3 +313,47 @@ class DepthService:
         cur = c.execute("SELECT %s FROM depth WHERE sid=? AND recv_ms>=? AND recv_ms<? ORDER BY id" % cols, (str(sid), lo, hi))
         header = [x[0] for x in cur.description]
         return c, cur, header
+
+    def stats(self, sid: str, day: str, bucket: int = 60, horizon: int = 5) -> dict:
+        """How price behaved after volume and queue imbalance, from the recorded buckets of one day (descriptive, not a forecast)."""
+        pts = self.series(sid, day, bucket)["points"]
+        n = len(pts)
+        horizon = max(1, min(int(horizon), 60))
+        res = {"bucket": bucket, "horizon": horizon, "buckets": n, "summary": None, "imbalance": [], "spikes": []}
+        if n < 3:
+            return res
+        vols = [p["vol"] or 0 for p in pts]
+        buyv, sellv = sum(p["buyv"] for p in pts), sum(p["sellv"] for p in pts)
+        tot = sum(vols)
+        move = [p["c"] - p["o"] for p in pts]
+        delta = [p["buyv"] - p["sellv"] for p in pts]
+
+        def corr(a, b):
+            m = len(a)
+            if m < 5:
+                return None
+            ma, mb = sum(a) / m, sum(b) / m
+            sa = sum((x - ma) ** 2 for x in a) ** 0.5
+            sb = sum((y - mb) ** 2 for y in b) ** 0.5
+            return round(sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (sa * sb), 3) if sa and sb else None
+        fwd = [(pts[i + horizon]["c"] - pts[i]["c"]) if i + horizon < n else None for i in range(n)]
+        pairs = [(pts[i]["imb"], fwd[i]) for i in range(n) if fwd[i] is not None]
+        res["summary"] = {"volume": tot, "buy_aggr": buyv, "sell_aggr": sellv, "unclassified": max(0, tot - buyv - sellv),
+                          "net_delta": buyv - sellv, "avg_imbalance": round(sum(p["imb"] for p in pts) / n, 3),
+                          "corr_delta_move": corr(delta, move), "corr_imb_fwd": corr([a for a, _ in pairs], [b for _, b in pairs]),
+                          "price_open": pts[0]["o"], "price_close": pts[-1]["c"]}
+        bins = [("bid heavy  (imbalance >= +0.40)", 0.4, 9), ("bid leaning (+0.15 to +0.40)", 0.15, 0.4), ("balanced (-0.15 to +0.15)", -0.15, 0.15),
+                ("offer leaning (-0.40 to -0.15)", -0.4, -0.15), ("offer heavy (<= -0.40)", -9, -0.4)]
+        for label, lo, hi in bins:
+            ch = [f for (i, f) in pairs if (lo <= i < hi or (hi == 9 and i >= lo))]
+            res["imbalance"].append({"label": label, "n": len(ch), "mean_fwd": round(sum(ch) / len(ch), 3) if ch else None,
+                                     "pct_up": round(100 * sum(1 for f in ch if f > 0) / len(ch)) if ch else None})
+        mean = tot / n
+        sd = (sum((v - mean) ** 2 for v in vols) / n) ** 0.5
+        for i, p in enumerate(pts):
+            if sd and vols[i] > mean + 2 * sd:
+                res["spikes"].append({"t": p["t"], "vol": vols[i], "x_avg": round(vols[i] / mean, 1) if mean else None, "buyv": p["buyv"], "sellv": p["sellv"],
+                                      "move": round(move[i], 2), "imb": p["imb"], "fwd": None if fwd[i] is None else round(fwd[i], 2)})
+        res["spikes"].sort(key=lambda x: -x["vol"])
+        res["spikes"] = res["spikes"][:15]
+        return res

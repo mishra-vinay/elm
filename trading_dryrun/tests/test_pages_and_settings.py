@@ -3,8 +3,10 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
+from demo_strategy import jp
 from dryrun.app import create_app, save_env_value, token_info
 from dryrun.config import Settings
 from dryrun.sim_feed import ReplayFeed
@@ -56,20 +58,20 @@ def test_several_runs_on_the_same_instrument_with_different_settings(tmp_path):
     app = sim_app(tmp_path, BUY_PATH, pause=0.25)             # slow enough that both runs are registered before the prices play
     with TestClient(app) as c:
         a = c.post("/api/runs", json={"query": "BAJFINANCE", "prev_high": 100, "prev_low": 95, "label": "wide target",
-                                       "params": {"target_pct": 2.0, "slippage_pct": 0, "cost_pct": 0}})
+                                       "params": jp(target_pct=2.0, slippage_pct=0, cost_pct=0)})
         b = c.post("/api/runs", json={"query": "BAJFINANCE", "prev_high": 100, "prev_low": 95, "label": "quick target",
-                                       "params": {"target_pct": 0.5, "stop_pct": 0.5, "slippage_pct": 0, "cost_pct": 0}})
+                                       "params": jp(target_pct=0.5, stop_pct=0.5, slippage_pct=0, cost_pct=0)})
         assert a.status_code == 200 and b.status_code == 200 and a.json()["id"] != b.json()["id"]
         runs = c.get("/api/state").json()["runs"]
         assert {r["label"] for r in runs} == {"wide target", "quick target"}
         assert c.get("/api/status").json()["active_runs"] == 2
         wait_for(lambda: all(r["summary"]["trades"] == 1 for r in c.get("/api/state").json()["runs"]))
         by_label = {r["label"]: r for r in c.get("/api/state").json()["runs"]}
-        assert by_label["wide target"]["params"]["target_pct"] == 2.0 and by_label["quick target"]["params"]["target_pct"] == 0.5
+        assert by_label["wide target"]["params"]["options"]["target_pct"] == 2.0 and by_label["quick target"]["params"]["options"]["target_pct"] == 0.5
         assert c.post("/api/runs/stop-all").json() == {"stopped": 2}
         hist = c.get("/api/state").json()["history"]
         assert {h["label"] for h in hist} == {"wide target", "quick target"}
-        assert all(h["ran_ok"] and h["trades"] == 1 and h["settings"]["pullback_pct"] == 1.0 for h in hist)
+        assert all(h["ran_ok"] and h["trades"] == 1 and h["settings"]["strategy"] == "demo" and h["settings"]["options"]["target_pct"] in (2.0, 0.5) for h in hist)
         text = "\n".join(r["message"] for r in c.get("/api/activity").json())
         assert "#1 wide target]" in text and "#2 quick target]" in text
 
@@ -95,7 +97,7 @@ def test_settings_show_token_expiry_but_never_the_token(tmp_path):
         assert tok not in r.text and "1114191751" not in r.text                  # neither the token nor the full client id
         s = r.json()
         assert s["client_id"] == "******1751" and s["token"]["status"] == "valid" and 4.9 * 3600 < s["token"]["seconds_left"] <= 5 * 3600
-        assert s["mode"] == "dhan" and s["sessions"]["NSE_EQ"]["square_off"] == "15:15" and s["sessions"]["MCX_COMM"]["square_off"] == "23:15"
+        assert s["mode"] == "dhan" and s["sessions"]["NSE_EQ"]["square_off"] == "15:15" and s["sessions"]["MCX_COMM"]["square_off"] == "23:20"
     assert token_info(jwt(-60))["status"] == "expired"
     assert token_info(jwt(3600))["status"] == "expiring soon"
     assert token_info("not-a-jwt") == {"set": True, "expires_at": None, "seconds_left": None, "status": "unknown"}
@@ -114,6 +116,7 @@ def test_dhan_connection_test_returns_only_safe_fields(tmp_path):
         c.app.state.manager.rest = type("Bad", (), {"profile": lambda self: (_ for _ in ()).throw(RuntimeError("profile HTTP 401: invalid token"))})()
         r = c.post("/api/settings/test")
         assert r.status_code == 502 and "401" in r.json()["detail"]
+        c.app.state.manager.writer.flush()          # the activity row is written by the background writer thread
         assert any("connection test failed" in x["message"] for x in c.get("/api/activity", params={"source": "errors"}).json())
 
 
@@ -192,3 +195,24 @@ def test_instrument_list_download_is_skipped_when_fresh(tmp_path):
         s.commit()
     assert instr.refreshed_recently(f) is True
     assert instr.refreshed_recently(f, hours=0) is False
+
+
+def test_backtest_page_is_slim_and_its_script_is_a_separate_file(tmp_path):
+    with TestClient(sim_app(tmp_path, [1.0])) as c:
+        page = c.get("/backtest").text
+        assert 'id="activity"' not in page and "Activity log" not in page                          # no activity log on this page
+        assert "Skip sessions" not in page and "minbars" not in page                                # the completeness filter is automatic, not a control
+        assert '<script src="/static/backtest.js' in page and "function runBt" not in page          # the page's code lives in its own file
+        js = c.get("/static/backtest.js")
+        assert js.status_code == 200 and "function runBt" in js.text and "min_bars_pct" not in js.text
+        assert c.get("/runs").text.count('id="activity"') == 1                                      # the other pages keep theirs
+        assert '<details class="more">' in page and 'id="stratBox"' in page and 'id="s_fields"' not in page                     # no strategy settings on the page
+
+
+@pytest.mark.usefixtures("only_shipped")
+def test_strategies_describe_themselves_and_have_no_settings_form(tmp_path):
+    with TestClient(sim_app(tmp_path, [1.0])) as c:
+        listed = {s["name"]: s for s in c.get("/api/strategies").json()["strategies"]}
+    assert set(listed) == {"range_thirds", "prev_day_zone30", "prev_day_zone30_buy_center", "market_shift", "market_shift_sell"}                       # the research version is hidden
+    assert "yesterday" in listed["range_thirds"]["blurb"] and "opening price" in listed["prev_day_zone30"]["blurb"]
+    assert all(v["fields"] == [] and v["blurb"] for v in listed.values()) and listed["prev_day_zone30_buy_center"]["label"] == "30% opening buy at center"

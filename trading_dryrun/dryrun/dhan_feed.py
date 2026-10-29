@@ -111,8 +111,12 @@ class DhanFeed:
     def __init__(self, client_id: str, token: str, on_tick: Callable[[FeedTick], None],
                  on_note: Callable[[FeedNote], None] | None = None,
                  on_status: Callable[[str, str], None] | None = None, packet: str = "quote",
-                 url: str = "wss://api-feed.dhan.co"):
+                 url: str = "wss://api-feed.dhan.co", ping_interval: float | None = 15.0, ping_timeout: float | None = 20.0):
         self.client_id, self.token, self.packet, self.url = client_id, token, packet, url
+        # Client keep-alive: Dhan pings us every 10 s, but a half-dead TCP connection (no packets, no close) would never be
+        # noticed without our own ping. No pong within ping_timeout closes the socket and the loop below reconnects.
+        self.ping_interval, self.ping_timeout = ping_interval, ping_timeout
+        self.rtt_ms: float | None = None          # last websocket ping round trip to Dhan, when the library reports it
         self.on_tick, self.on_note, self.on_status = on_tick, on_note, on_status
         self.subscribed: set[tuple[str, str]] = set()
         self.connected = False
@@ -170,12 +174,15 @@ class DhanFeed:
                 continue
             uri = f"{self.url}?version=2&token={self.token}&clientId={self.client_id}&authType=2"
             try:
-                async with websockets.connect(uri, ping_interval=None, max_size=2 ** 20, open_timeout=15) as ws:
+                async with websockets.connect(uri, ping_interval=self.ping_interval, ping_timeout=self.ping_timeout,
+                                              max_size=2 ** 20, open_timeout=15) as ws:
                     self._ws, self.connected, backoff = ws, True, 1.0
                     self._status("info", "feed connected")
                     for m in subscribe_messages(self.subscribed, self.packet):
                         await ws.send(m)
                     async for msg in ws:
+                        lat = getattr(ws, "latency", None)
+                        self.rtt_ms = round(lat * 1000, 1) if lat else self.rtt_ms
                         self.last_message_at = datetime.now(IST).replace(tzinfo=None)
                         if isinstance(msg, str):
                             continue

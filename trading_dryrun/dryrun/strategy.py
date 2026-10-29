@@ -1,46 +1,50 @@
-"""Previous-day High/Low break-and-pullback engine.
+"""Strategy framework. No strategy ships with the app: add one by writing a `StrategyEngine` subclass and registering it (see `strategies/`).
 
-Pure logic: no database, no network, no clock. Feed it (timestamp, price) ticks and it returns events.
-The same class is used by the live dry-run runner and by the historical replay (dryrun.replay), so the
-rule cannot drift between testing and running.
+The engine here holds everything that is the same for every strategy, so a new rule only has to say *when to enter and where its stop and
+target are*: one open position at a time (optional both sides), slippage on market fills, a limit target, a market stop, round-trip costs,
+the daily loss limit, the trade-count limits, the independent risk gate (`approve`), square-off and the run summary.
 
-Rule
-  BUY : price trades above the previous-day High (+break_buffer), later pulls back `pullback` below
-        the High  -> buy signal, enter at that tick.
-  SELL: price trades below the previous-day Low (-break_buffer), later pulls back `pullback` above
-        the Low   -> sell signal, enter at that tick.
-  Exit: +target (limit, fills at the target price), -stop (market, fills at the tick that crossed it),
-        or square-off at the end of the session (market).
-Validation status: the rule was backtested on silver and Bajaj Finance and showed no edge
-(docs/silver-options-study.md, docs/bajajfinance-study.md). Running it here is for data collection.
+Pure logic: no database, no network, no clock. Feed it (timestamp, price) ticks and it returns events. The live dry-run runner, the historical
+replay and the online backtest all build the engine through `make_engine`, so a rule cannot drift between testing and running.
+
+To add a strategy:
+
+    class MyEngine(StrategyEngine):
+        def evaluate(self, ts, price):            # called on every tick after any open position has been managed
+            ...                                    # return a list of Events; to open a trade call self._open(...)
+
+    register(StrategySpec(name="my_strategy", label="My strategy", engine=MyEngine,
+                          fields=[{"key": "distance_pct", "label": "Distance %", "type": "number", "default": 1.0, "step": 0.1}]))
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, time
+from typing import Callable
+
+
+class NoStrategyError(ValueError):
+    pass
 
 
 @dataclass
 class Params:
-    pullback_pct: float = 1.0          # how far back inside the broken level the entry needs (0 = retest of the level)
-    target_pct: float = 2.0            # profit target from entry, %
-    stop_pct: float | None = 1.0       # stop-loss from entry, %; None = no stop
-    break_buffer_pct: float = 0.0      # break must exceed the level by this %
+    strategy: str = ""                 # name of a registered strategy
+    options: dict = field(default_factory=dict)   # that strategy's own settings (see its StrategySpec.fields)
     qty: float = 1.0                   # units (shares / contract units) per trade
     slippage_pct: float = 0.02         # simulated slippage per side, % of price
     cost_pct: float = 0.10             # round-trip costs, % of entry value (brokerage, taxes, fees)
     allow_both_sides: bool = False     # False = one open position at a time per run
-    max_trades_per_side: int = 1       # per day; >1 allows re-entry after a fresh break
+    max_trades_per_side: int = 1       # per day
     max_trades_per_day: int = 2        # risk limit across both sides
     daily_loss_limit_pct: float | None = 2.0   # stop opening trades when the run's net P&L (% of entry value, summed) <= -this
 
     def validate(self) -> None:
-        if self.pullback_pct < 0 or self.target_pct <= 0 or self.break_buffer_pct < 0:
-            raise ValueError("pullback_pct and break_buffer_pct must be >= 0 and target_pct > 0")
-        if self.stop_pct is not None and self.stop_pct <= 0:
-            raise ValueError("stop_pct must be > 0 or empty")
         if self.qty <= 0:
             raise ValueError("qty must be > 0")
+        spec = get_strategy(self.strategy)
+        if spec.validate is not None:
+            spec.validate(self.options)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -55,7 +59,7 @@ class Params:
 
 @dataclass
 class Event:
-    kind: str                 # break | entry_signal | entry_skipped | entry | exit
+    kind: str                 # entry_signal | entry_skipped | entry | exit | any short label a strategy adds (e.g. "break", "armed"; at most 8 characters)
     ts: datetime
     side: str                 # BUY | SELL
     price: float
@@ -75,45 +79,51 @@ class Position:
     qty: float
 
 
-class BreakoutPullbackEngine:
+class StrategyEngine:
+    """Generic trade mechanics. Subclasses implement `evaluate` (and optionally `levels`, `status_text`, `describe_event`)."""
+
     def __init__(self, high: float, low: float, params: Params, approve=None):
         """approve(side, ts, price, state) -> (bool, reason): independent risk gate called before every entry."""
         if not (high > low > 0):
             raise ValueError(f"need High > Low > 0, got High={high} Low={low}")
         params.validate()
         self.high, self.low, self.p = high, low, params
+        self.options = params.options
         self.approve = approve
-        self.armed = {"BUY": False, "SELL": False}
+        self.flags: dict[str, bool] = {}              # free-form booleans a strategy exposes to the dashboard (e.g. "BUY armed")
         self.trades_by_side = {"BUY": 0, "SELL": 0}
         self.position: Position | None = None
         self.closed: list[dict] = []
         self.last_price: float | None = None
+        self.day_open: float | None = None            # the session's opening price; the runner sets it when a run starts mid-session, else the first price seen
+        self.session_open: time | None = None         # the session's opening time; set by the runner and the replay, None = the first tick's time
+        self.symbol: str | None = None                # the instrument's symbol; set by the runner and the replay (used for the lot size when a strategy sizes its trades)
         self.net_pct_sum = 0.0
         self.session_over = False
 
-    # --- levels -------------------------------------------------------------------------------
-    @property
-    def break_up_level(self) -> float:
-        return self.high * (1 + self.p.break_buffer_pct / 100)
+    # --- hooks for a strategy ------------------------------------------------------------------
+    def evaluate(self, ts: datetime, price: float) -> list[Event]:
+        raise NotImplementedError("a strategy must implement evaluate()")
 
-    @property
-    def break_down_level(self) -> float:
-        return self.low * (1 - self.p.break_buffer_pct / 100)
+    def levels(self) -> list[dict]:
+        """Horizontal lines for the dashboard chart: [{"name", "value", "color"}], color one of blue green red orange muted."""
+        return [{"name": "prev High", "value": self.high, "color": "blue"}, {"name": "prev Low", "value": self.low, "color": "orange"}]
 
-    @property
-    def buy_entry_level(self) -> float:
-        return self.high * (1 - self.p.pullback_pct / 100)
+    def status_text(self, price: float | None) -> str:
+        return ""
 
-    @property
-    def sell_entry_level(self) -> float:
-        return self.low * (1 + self.p.pullback_pct / 100)
+    def describe_event(self, ev: Event) -> str | None:
+        return ev.reason
 
+    def qty_for(self, side: str, entry: float, stop: float | None) -> float:
+        """Units for a trade about to be opened at `entry` with `stop`. The default is the run's fixed quantity; a strategy can size each trade (e.g. by a maximum loss)."""
+        return self.p.qty
+
+    # --- ticks ---------------------------------------------------------------------------------
     def state(self) -> dict:
-        return {"armed_buy": self.armed["BUY"], "armed_sell": self.armed["SELL"],
-                "trades_today": sum(self.trades_by_side.values()), "net_pct_sum": self.net_pct_sum,
+        return {"flags": dict(self.flags), "trades_today": sum(self.trades_by_side.values()), "net_pct_sum": self.net_pct_sum,
                 "position": None if self.position is None else self.position.side}
 
-    # --- ticks --------------------------------------------------------------------------------
     def on_tick(self, ts: datetime, price: float) -> list[Event]:
         if self.session_over or price <= 0:
             return []
@@ -123,34 +133,10 @@ class BreakoutPullbackEngine:
             ev = self._manage(ts, price)
             if ev:
                 events.append(ev)
-        # break detection (arming) and entry; a single tick can arm or trigger a side, never both
-        for side in ("BUY", "SELL"):
-            events.extend(self._side(side, ts, price))
+        events.extend(self.evaluate(ts, price))
         return events
 
-    def _side(self, side: str, ts: datetime, price: float) -> list[Event]:
-        out: list[Event] = []
-        up = side == "BUY"
-        broke = price > self.break_up_level if up else price < self.break_down_level
-        level = self.high if up else self.low
-        if not self.armed[side]:
-            if broke and self.trades_by_side[side] < self.p.max_trades_per_side:
-                self.armed[side] = True
-                out.append(Event("break", ts, side, price, level, "price broke previous day %s" % ("High" if up else "Low")))
-            return out
-        pulled_back = price <= self.buy_entry_level if up else price >= self.sell_entry_level
-        if not pulled_back:
-            return out
-        self.armed[side] = False          # one shot per break; a re-entry needs a fresh break
-        out.append(Event("entry_signal", ts, side, price, level, "pullback after break"))
-        reason = self._block_reason(side, ts, price)
-        if reason:
-            out.append(Event("entry_skipped", ts, side, price, level, reason))
-            return out
-        out.append(self._enter(side, ts, price, level))
-        return out
-
-    def _block_reason(self, side: str, ts: datetime, price: float) -> str | None:
+    def block_reason(self, side: str, ts: datetime, price: float) -> str | None:
         if self.position is not None and not self.p.allow_both_sides:
             return "a position is already open"
         if self.position is not None and self.position.side == side:
@@ -165,13 +151,23 @@ class BreakoutPullbackEngine:
                 return why or "risk engine rejected"
         return None
 
-    def _enter(self, side: str, ts: datetime, price: float, level: float) -> Event:
+    def signal(self, side: str, ts: datetime, price: float, level: float | None, reason: str,
+               exits: Callable[[float], tuple[float | None, float]]) -> list[Event]:
+        """The usual entry sequence: an entry_signal event, then either entry_skipped (with the reason) or the entry itself.
+        `exits(entry_price)` returns (stop or None, target) in absolute prices."""
+        out = [Event("entry_signal", ts, side, price, level, reason)]
+        blocked = self.block_reason(side, ts, price)
+        if blocked:
+            out.append(Event("entry_skipped", ts, side, price, level, blocked))
+        else:
+            out.append(self._enter(side, ts, price, level, exits))
+        return out
+
+    def _enter(self, side: str, ts: datetime, price: float, level: float | None, exits: Callable[[float], tuple[float | None, float]]) -> Event:
         slip = price * self.p.slippage_pct / 100
         entry = price + slip if side == "BUY" else price - slip
-        sign = 1 if side == "BUY" else -1
-        target = entry * (1 + sign * self.p.target_pct / 100)
-        stop = None if self.p.stop_pct is None else entry * (1 - sign * self.p.stop_pct / 100)
-        self.position = Position(side, ts, price, entry, target, stop, self.p.qty)
+        stop, target = exits(entry)
+        self.position = Position(side, ts, price, entry, target, stop, self.qty_for(side, entry, stop))
         self.trades_by_side[side] += 1
         return Event("entry", ts, side, entry, level, None, trade=self._snap(self.position))
 
@@ -227,3 +223,49 @@ class BreakoutPullbackEngine:
                 "targets": sum(1 for x in t if x["exit_reason"] == "target"),
                 "stops": sum(1 for x in t if x["exit_reason"] == "stop"),
                 "squareoffs": sum(1 for x in t if x["exit_reason"] in ("squareoff", "manual"))}
+
+
+# ------------------------------------------------------------------------------------------------
+# registry
+@dataclass
+class StrategySpec:
+    name: str                                   # stored in Params.strategy and in every run's record
+    label: str                                  # shown in the dropdown
+    engine: type                                # a StrategyEngine subclass
+    fields: list[dict] = field(default_factory=list)   # settings form: {"key","label","type": number|select,"default","step","choices": [[value,label]],"help"}   (most strategies need no form: their rules and numbers are written in the strategy file)
+    validate: Callable[[dict], None] | None = None     # raise ValueError for bad options
+    preview: Callable[[float, float, dict], dict | None] | None = None   # (high, low, options) -> {"summary": str, "cards": [{"title","rows":[[k,v]]}], "notes": [str]}
+    describe: Callable[[float, float, dict], str] | None = None          # one-line description for the run log
+    blurb: str = ""                                                      # one plain-English paragraph shown under the strategy dropdown
+    hidden: bool = False                                                 # research strategies: usable by name (tests, tools) but not listed in the dropdowns
+    guide: list = field(default_factory=list)                            # the Strategies page: [(heading, [paragraph, ...]), ...] describing the rules step by step
+
+    def public(self) -> dict:
+        return {"name": self.name, "label": self.label, "blurb": self.blurb, "fields": self.fields, "has_preview": self.preview is not None,
+                "guide": [{"title": t, "items": list(items)} for t, items in self.guide]}
+
+
+STRATEGIES: dict[str, StrategySpec] = {}
+
+
+def register(spec: StrategySpec) -> StrategySpec:
+    STRATEGIES[spec.name] = spec
+    return spec
+
+
+def unregister(name: str) -> None:
+    STRATEGIES.pop(name, None)
+
+
+def get_strategy(name: str) -> StrategySpec:
+    if not STRATEGIES:
+        raise NoStrategyError("No strategy is installed yet. Add one in dryrun/strategies/ (see the README).")
+    spec = STRATEGIES.get(name)
+    if spec is None:
+        raise NoStrategyError(f"unknown strategy '{name}'; installed: {', '.join(sorted(STRATEGIES))}")
+    return spec
+
+
+def make_engine(high: float, low: float, params: Params, approve=None) -> StrategyEngine:
+    """The engine for params.strategy (shared by the live runner, the replay and the backtest)."""
+    return get_strategy(params.strategy).engine(high, low, params, approve=approve)

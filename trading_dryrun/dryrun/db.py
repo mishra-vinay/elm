@@ -166,6 +166,13 @@ class ApiLog(Base):
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class AppSetting(Base):
+    """Small key/value store for settings that are changed from the dashboard (they override the .env defaults)."""
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(48), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200))
+
+
 class RiskLog(Base):
     __tablename__ = "risk_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -200,14 +207,55 @@ def init_db(url: str):
     return engine, sessionmaker(engine, expire_on_commit=False)
 
 
+def get_setting(factory: sessionmaker, key: str, default: str | None = None) -> str | None:
+    with factory() as s:
+        row = s.get(AppSetting, key)
+        return row.value if row is not None else default
+
+
+def set_setting(factory: sessionmaker, key: str, value: str) -> None:
+    with factory() as s:
+        row = s.get(AppSetting, key)
+        if row is None:
+            s.add(AppSetting(key=key, value=str(value)))
+        else:
+            row.value = str(value)
+        s.commit()
+
+
+def delete_ticks(factory: sessionmaker, before: datetime | None = None, day: date | None = None,
+                 instrument_id: int | None = None, batch: int = 50000) -> int:
+    """Delete stored ticks (older than `before`, or one calendar `day`, optionally one instrument) in batches, so the
+    live writer thread is never locked out of the database for long."""
+    from sqlalchemy import delete, select
+    cond = []
+    if before is not None:
+        cond.append(Tick.ts < before)
+    if day is not None:
+        cond += [Tick.ts >= datetime.combine(day, datetime.min.time()), Tick.ts < datetime.combine(day + timedelta(days=1), datetime.min.time())]
+    if instrument_id is not None:
+        cond.append(Tick.instrument_id == instrument_id)
+    if not cond:
+        raise ValueError("refusing to delete every tick without a condition")
+    total = 0
+    while True:
+        with factory() as s:
+            ids = s.scalars(select(Tick.id).where(*cond).limit(batch)).all()
+            if not ids:
+                return total
+            s.execute(delete(Tick).where(Tick.id.in_(ids)))
+            s.commit()
+            total += len(ids)
+
+
 def purge_old_ticks(factory: sessionmaker, keep_days: int) -> int:
     from sqlalchemy import delete
     cutoff = now_ist() - timedelta(days=keep_days)
+    n = delete_ticks(factory, before=cutoff)
     with factory() as s:
-        res = s.execute(delete(Tick).where(Tick.ts < cutoff))
         s.execute(delete(ApiLog).where(ApiLog.ts < now_ist() - timedelta(days=max(keep_days, 60))))
         s.commit()
-        return res.rowcount or 0
+    return n
 
 
 def jdump(obj) -> str:

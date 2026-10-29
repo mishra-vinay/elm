@@ -8,7 +8,7 @@ from dryrun.app import create_app
 from dryrun.config import Settings
 from dryrun.replay import replay_day, replay_range
 from dryrun.sim_feed import ReplayFeed
-from dryrun.strategy import Params
+from demo_strategy import P, jp
 
 START = datetime(2026, 10, 9, 10, 0, 0)
 # H=100, L=95: break up, pullback to 99.0 (BUY), then the +2% target (about 101.02)
@@ -34,7 +34,7 @@ def test_full_dry_run_buy_to_target_is_saved(tmp_path):
     app = make_app(tmp_path, BUY_PATH)
     with TestClient(app) as c:
         r = c.post("/api/runs", json={"query": "BAJFINANCE", "prev_high": 100, "prev_low": 95,
-                                       "params": {"slippage_pct": 0, "cost_pct": 0}})
+                                       "params": jp(slippage_pct=0, cost_pct=0)})
         assert r.status_code == 200, r.text
         rid = r.json()["id"]
         wait_for(lambda: c.get("/api/state").json()["runs"][0]["summary"]["trades"] == 1)
@@ -69,7 +69,7 @@ def test_validation_and_unknown_instrument(tmp_path):
     app = make_app(tmp_path, [1.0])
     with TestClient(app) as c:
         assert c.post("/api/runs", json={"query": "nothing-like-this", "params": {}}).status_code == 404
-        assert c.post("/api/runs", json={"query": "BAJFINANCE", "params": {"target_pct": 0}, "prev_high": 2, "prev_low": 1}).status_code == 400
+        assert c.post("/api/runs", json={"query": "BAJFINANCE", "params": jp(target_pct=0), "prev_high": 2, "prev_low": 1}).status_code == 400
         assert c.get("/api/instruments/search", params={"q": "nifty"}).json()[0]["symbol"] == "NIFTY"
         assert c.post("/api/runs/999/stop").status_code == 404
         assert c.post("/api/backfill", json={"instrument_id": 1}).status_code == 400          # no Dhan credentials in sim mode
@@ -118,7 +118,7 @@ def test_replay_day_matches_live_engine_on_same_prices():
     candles = [candle(day, 99.5, 100.6, 99.4, 100.5),                    # bullish bar: O, L, H, C -> breaks above 100
                candle(day + timedelta(minutes=1), 100.5, 100.6, 98.9, 99.0),   # bearish: O, H, L, C -> pulls back to 99.0
                candle(day + timedelta(minutes=2), 99.0, 101.5, 99.0, 101.4)]
-    res = replay_day(candles, 100, 95, Params(slippage_pct=0, cost_pct=0))
+    res = replay_day(candles, 100, 95, P(slippage_pct=0, cost_pct=0))
     assert res["trades"] == 1 and res["trade_list"][0]["exit_reason"] == "target"
 
 
@@ -128,7 +128,7 @@ def test_replay_range_uses_previous_day_levels():
     candles = [candle(d1, 97, 100, 95, 98), candle(d1 + timedelta(minutes=1), 98, 99, 96, 97)]
     candles += [candle(d2, 99.5, 100.6, 99.4, 100.5), candle(d2 + timedelta(minutes=1), 100.5, 100.6, 98.9, 99.0),
                 candle(d2 + timedelta(minutes=2), 99.0, 101.5, 99.0, 101.4)]
-    r = replay_range(candles, Params(slippage_pct=0, cost_pct=0))
+    r = replay_range(candles, P(slippage_pct=0, cost_pct=0))
     assert r["sessions"] == 1 and r["trades"] == 1 and r["wins"] == 1
 
 
@@ -138,7 +138,7 @@ def test_search_accepts_the_dropdown_label_and_status_text_explains_what_is_happ
         hit = c.get("/api/instruments/search", params={"q": "Bajaj Finance [NSE_EQ:317]"}).json()
         assert len(hit) == 1 and hit[0]["security_id"] == "317"          # exactly what the dropdown puts in the box
         r = c.post("/api/runs", json={"instrument_id": hit[0]["id"], "prev_high": 100, "prev_low": 95,
-                                       "params": {"slippage_pct": 0, "cost_pct": 0}})
+                                       "params": jp(slippage_pct=0, cost_pct=0)})
         assert r.status_code == 200, r.text
         wait_for(lambda: c.get("/api/state").json()["runs"][0]["summary"]["trades"] == 1)
         run = c.get("/api/state").json()["runs"][0]
