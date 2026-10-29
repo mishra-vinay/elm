@@ -1,0 +1,19 @@
+[Unit]
+Description=Dry-run trading dashboard and strategy runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/dryrun
+EnvironmentFile=/opt/dryrun/.env
+ExecStart=/opt/dryrun/venv/bin/python -m dryrun
+Restart=on-failure
+RestartSec=5
+ProtectSystem=full
+ReadWritePaths=/opt/dryrun/data
+NoNewPrivileges=true
+Environment=TZ=Asia/Kolkata
+
+[Install]
+WantedBy=multi-user.target

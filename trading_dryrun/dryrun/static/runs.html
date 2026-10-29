@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dry runs · Dry-run trading</title>
+<link rel="stylesheet" href="/static/app.css?v=7">
+</head>
+<body>
+<div id="hdr"></div>
+<main id="app">
+  <section>
+    <h2>Start a dry run on live market data</h2>
+    <div class="row" style="align-items:flex-end">
+      <div style="flex:2;min-width:260px"><label>Stock, index or futures contract: name, symbol, security id or SEGMENT:ID (e.g. NSE_FNO:48704)</label>
+        <input id="q" list="hits" autocomplete="off" placeholder="e.g. Nifty 50, BAJFINANCE, SILVERM, IDX_I:13"></div>
+      <datalist id="hits"></datalist>
+      <div style="flex:1;min-width:140px"><label>Run name (optional)</label><input id="p_label" maxlength="40" placeholder="e.g. tight stop"></div>
+      <button class="primary" id="startBtn" onclick="startRun()">Start dry run</button>
+    </div>
+    <div id="picked" class="small muted" style="margin:6px 0"></div>
+    <div id="stratBox"></div>
+    <div class="grid" style="margin-top:10px">
+      <div><label>Max trades / day</label><input id="p_maxday" type="number" step="1" value="2"></div>
+      <div><label>Daily loss limit % (empty = none)</label><input id="p_loss" type="number" step="0.1" value="2.0"></div>
+    </div>
+    <div id="manualBox" style="margin-top:10px" class="grid">
+      <div><label>Previous day High (filled in automatically; you can edit)</label><input id="m_high" type="number" step="any" placeholder="pick an instrument"></div>
+      <div><label>Previous day Low (filled in automatically; you can edit)</label><input id="m_low" type="number" step="any" placeholder="pick an instrument"></div>
+      <div class="small muted" id="levelNote" style="grid-column:span 2;align-self:end">Pick an instrument and its previous-day High/Low appear here.</div>
+    </div>
+    <div id="calcBox" class="help" style="margin-top:10px"><b>Calculation</b> <span class="muted">(updates as you change the strategy settings or the High/Low)</span><div id="calc" style="margin-top:6px"></div></div>
+    <div class="help"><b>Several runs at once:</b> start as many as you like (up to 20), on different instruments or on the <i>same</i> instrument with different settings and names to compare them side by side.
+      They all read the same live prices and are independent.<br>
+      Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API. Real-order live trading is <b>not enabled</b> in this phase: nothing here ever sends an order.</div>
+    <div class="small neg" id="startMsg" style="margin-top:6px"></div>
+  </section>
+
+  <section><div class="row"><h2 style="margin:0">Active runs</h2><span style="flex:1"></span><button class="danger" id="stopAll" onclick="stopAll()" style="display:none">Stop all &amp; square off</button></div>
+    <div class="tbl" id="runSummary" style="margin:8px 0"></div>
+    <div id="runs"><span class="muted">No active runs.</span></div></section>
+
+  <section><h2>Finished runs</h2>
+    <div class="tbl"><table id="hist"><thead><tr><th>#</th><th>Name</th><th>Date</th><th>Instrument</th><th>Settings</th><th>Status</th><th>Ran OK</th><th class="num">Ticks</th>
+      <th class="num">Trades</th><th class="num">Win %</th><th class="num">Net P&amp;L</th><th class="num">Coverage</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div id="detail" style="margin-top:12px"></div>
+  </section>
+
+  <section id="activity"></section>
+</main>
+<script src="/static/common.js?v=13"></script>
+<script>
+let picked = null, autoLevels = null, lastPreview = null;
+
+wireSearch("q", "hits", (hit, all) => {
+  picked = hit; if (hit && hit.id !== lastPreview) previewLevels();
+  $("picked").textContent = hit ? `Selected: ${hit.label} · ${hit.instrument}${hit.expiry ? " · expires " + hit.expiry : ""} · lot ${hit.lot_size}` : (all.length ? `${all.length} matches, pick one from the list` : "no match");
+});
+async function previewLevels() {
+  lastPreview = picked.id; autoLevels = null; $("levelNote").textContent = "Looking up previous-day High/Low…";
+  try {
+    const {data} = await api("/api/levels?instrument_id=" + picked.id);
+    if (data.found) {
+      $("m_high").value = data.high; $("m_low").value = data.low; autoLevels = {high: data.high, low: data.low}; calcPreview();
+      $("levelNote").textContent = `Filled in for the session on ${data.trading_date}: High ${fmt(data.high)}, Low ${fmt(data.low)} (${data.source}${data.from_date ? ", day " + data.from_date : ""}). Edit to override.`;
+    } else { $("m_high").value = ""; $("m_low").value = ""; $("levelNote").textContent = data.detail; calcPreview(); }
+  } catch (e) { $("levelNote").textContent = "Could not look up levels: " + e.message; }
+}
+// The strategy computes its own prices for the previous-day High and Low in the boxes above; the server returns them ready to show.
+let previewTimer;
+function calcPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    const box = $("calc"), H = Number($("m_high").value), L = Number($("m_low").value), sp = STRAT.none ? null : strategyParams();
+    $("startBtn").disabled = STRAT.none;
+    if (!sp) { box.innerHTML = '<span class="muted">No strategy is installed yet, so there is nothing to calculate.</span>'; return; }
+    if (!(H > L && L > 0)) { box.innerHTML = '<span class="muted">Pick an instrument (or type the previous-day High and Low) to see the calculated prices.</span>'; return; }
+    try { const {data} = await api(`/api/strategies/${encodeURIComponent(sp.strategy)}/preview`, {method: "POST", body: JSON.stringify({high: H, low: L, options: sp.options})}); renderPreview(box, data); }
+    catch (e) { box.innerHTML = `<span class="neg">${esc(e.message)}</span>`; }
+  }, 250);
+}
+["input", "change"].forEach(ev => document.addEventListener(ev, e => { if (e.target && e.target.closest && e.target.closest("#m_high, #m_low")) calcPreview(); }));
+function params() {
+  const n = id => $(id).value === "" ? null : Number($(id).value), sp = strategyParams();
+  if (!sp) throw new Error("No strategy is installed yet.");
+  return {...sp, max_trades_per_day: n("p_maxday") ?? 2, daily_loss_limit_pct: n("p_loss")};
+}
+async function startRun() {
+  $("startMsg").textContent = ""; $("startBtn").disabled = true;
+  const body = {params: params(), label: $("p_label").value};
+  if (picked) body.instrument_id = picked.id; else body.query = $("q").value;
+  const mh = $("m_high").value, ml = $("m_low").value;
+  const untouched = autoLevels && Number(mh) === autoLevels.high && Number(ml) === autoLevels.low;     // keep the automatic source
+  if ((mh !== "" || ml !== "") && !untouched) { body.prev_high = Number(mh); body.prev_low = Number(ml); }
+  try {
+    const {status, data} = await api("/api/runs", {method: "POST", body: JSON.stringify(body)});
+    if (status === 409) { $("startMsg").className = "small neg"; $("startMsg").textContent = data.detail + " Type them in the High and Low boxes above, then click Start again."; picked = data.instrument; $("m_high").focus(); }
+    else { $("startMsg").className = "small muted"; $("startMsg").textContent = data.scheduled ? `Market is closed now. The run is scheduled for ${data.trading_date} and starts at the open. Keep the server running.` : `Run ${data.id} started.`; refresh(); refreshActivity(); }
+  } catch (e) { $("startMsg").className = "small neg"; $("startMsg").textContent = e.message; }
+  $("startBtn").disabled = false;
+}
+async function stopRun(id) { await api(`/api/runs/${id}/stop`, {method: "POST"}); refresh(); refreshActivity(); }
+async function stopAll() { if (!confirm("Stop every active run and square off any open simulated position?")) return; await api("/api/runs/stop-all", {method: "POST"}); refresh(); refreshActivity(); }
+
+function chart(canvas, r) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr; const g = canvas.getContext("2d"); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  const prices = r.prices.map(p => p[1]);
+  const colors = {blue: "--blue", green: "--green", red: "--red", orange: "--orange", muted: "--muted"};
+  const lines = (r.levels || []).map(l => [l.value, l.name, col(colors[l.color] || "--muted")]);
+  const all = prices.concat(lines.map(l => l[0]));
+  if (r.position) { all.push(r.position.target); if (r.position.stop) all.push(r.position.stop); }
+  let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
+  const y = v => h - 14 - (v - lo) / (hi - lo) * (h - 24);
+  g.font = "11px system-ui"; g.lineWidth = 1;
+  const RM = 128, labels = [];
+  const hline = (v, name, c, dash) => { g.strokeStyle = c; g.setLineDash(dash); g.beginPath(); g.moveTo(0, y(v)); g.lineTo(w - RM + 4, y(v)); g.stroke(); g.setLineDash([]); labels.push({y: y(v), text: `${name} ${fmt(v)}`, c}); };
+  lines.forEach(([v, name, c]) => hline(v, name, c, [5, 4]));
+  if (r.position) [[r.position.target, "target"], [r.position.stop, "stop"]].forEach(([v, n]) => { if (v) hline(v, n, col("--muted"), [2, 3]); });
+  labels.sort((a, b) => a.y - b.y);                                   // push labels apart so close levels stay readable
+  for (let i = 1; i < labels.length; i++) if (labels[i].y - labels[i - 1].y < 12) labels[i].y = labels[i - 1].y + 12;
+  labels.forEach(l => { g.fillStyle = col("--ink2"); g.fillText(l.text, w - RM + 8, l.y + 3); });
+  if (prices.length > 1) { g.strokeStyle = col("--ink"); g.lineWidth = 1.6; g.beginPath(); prices.forEach((p, i) => { const x = i / (prices.length - 1) * (w - RM); i ? g.lineTo(x, y(p)) : g.moveTo(x, y(p)); }); g.stroke(); }
+  else { g.fillStyle = col("--muted"); g.fillText("waiting for ticks…", 10, h / 2); }
+}
+
+const setting = p => optionsText(p);
+let lastRuns = [];
+function renderRuns(runs) {
+  lastRuns = runs;
+  $("stopAll").style.display = runs.length > 1 ? "" : "none";
+  $("runSummary").innerHTML = runs.length ? `<table><thead><tr><th>#</th><th>Name</th><th>Instrument</th><th>Settings</th><th>Status</th><th class="num">Last</th><th>Position</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th></th></tr></thead><tbody>${runs.map(r => {
+    const pos = r.position;
+    return `<tr><td>${r.id}</td><td>${esc(r.label)}</td><td>${esc(r.instrument)}</td><td>${setting(r.params)}</td><td>${r.status}</td><td class="num">${fmt(r.last_price)}</td>
+      <td>${pos ? `${pos.side} @ ${fmt(pos.entry)} (<span class="${cls(pos.unrealised_pct)}">${fmt(pos.unrealised_pct)}%</span>)` : "–"}</td><td class="num">${r.summary.trades}</td>
+      <td class="num ${cls(r.summary.net_pnl)}">₹${fmt(r.summary.net_pnl)}</td><td><button class="danger" onclick="stopRun(${r.id})">Stop</button></td></tr>`; }).join("")}</tbody></table>` : "";
+  const el = $("runs");
+  if (!runs.length) { el.innerHTML = '<span class="muted">No active runs.</span>'; return; }
+  el.innerHTML = runs.map(r => {
+    const s = r.summary, pos = r.position;
+    return `<div class="run" id="run${r.id}"><div class="row"><h3>#${r.id} ${esc(r.label)} ${esc(r.instrument)}</h3><span class="badge ${r.status === "running" ? "ok" : "warn"}">${r.status}</span>
+      <span class="small muted">settings ${setting(r.params)} · levels from ${esc(r.levels_source)} · square-off ${r.squareoff}</span><span style="flex:1"></span><button class="danger" onclick="stopRun(${r.id})">Stop &amp; square off</button></div>
+      <div class="now"><b>What is happening now:</b> ${esc(r.status_text)}</div>
+      <div class="kv"><span>Last <b>${fmt(r.last_price)}</b></span><span>Ticks <b>${r.ticks}</b></span><span>Last tick <b>${r.last_tick_age == null ? "–" : r.last_tick_age + "s ago"}</b></span>
+        ${Object.entries(r.flags || {}).map(([k, v]) => `<span>${esc(k)} <b>${v ? "yes" : "–"}</b></span>`).join("")}</div>
+      <div class="kv">${pos ? `<span>Open <b>${pos.side}</b> @ <b>${fmt(pos.entry)}</b></span><span>Target <b>${fmt(pos.target)}</b></span><span>Stop <b>${pos.stop ? fmt(pos.stop) : "none"}</b></span><span class="${cls(pos.unrealised_pct)}">Unrealised <b>${fmt(pos.unrealised_pct)}%</b></span>` : '<span class="muted">No open position</span>'}
+        <span>Trades <b>${s.trades}</b></span><span>Wins <b>${s.wins}</b></span><span class="${cls(s.net_pnl)}">Net P&amp;L <b>₹${fmt(s.net_pnl)}</b></span></div>
+      <canvas id="c${r.id}"></canvas>
+      <ul class="events">${r.log.slice(0, 15).map(l => `<li><b>${l[0]}</b> ${esc(l[1])}</li>`).join("")}</ul></div>`;
+  }).join("");
+  runs.forEach(r => chart($("c" + r.id), r));
+}
+function renderHist(h) {
+  $("hist").querySelector("tbody").innerHTML = h.map(r => `<tr><td>${r.id}</td><td>${esc(r.label)}</td><td class="nw">${r.date}</td><td>${esc(r.instrument)}</td><td>${setting(r.settings)}</td><td>${r.status}</td>
+    <td>${r.ran_ok == null ? "–" : r.ran_ok ? '<span class="pos">yes</span>' : '<span class="neg" title="' + esc(r.error || "") + '">no</span>'}</td><td class="num">${r.ticks ?? 0}</td><td class="num">${r.trades ?? "–"}</td>
+    <td class="num">${r.win_rate == null ? "–" : fmt(r.win_rate * 100, 0)}</td><td class="num ${cls(r.net_pnl)}">${r.net_pnl == null ? "–" : "₹" + fmt(r.net_pnl)}</td>
+    <td class="num">${r.coverage == null ? "–" : fmt(r.coverage * 100, 0) + "%"}</td><td><button onclick="showDetail(${r.id})">Details</button></td></tr>`).join("") || '<tr><td colspan="13" class="muted">Nothing yet.</td></tr>';
+}
+async function showDetail(id) {
+  const {data: d} = await api("/api/runs/" + id);
+  const sm = d.summary || {};
+  $("detail").innerHTML = `<h2>Run ${d.id}${d.label ? " (" + esc(d.label) + ")" : ""}: ${esc(d.instrument)} · ${d.date}</h2><div class="small muted">Previous High ${fmt(d.high)} · Low ${fmt(d.low)} (${esc(d.levels_source)}) · ticks ${d.ticks} · data coverage ${sm.data_coverage == null ? "–" : fmt(sm.data_coverage * 100, 0) + "%"} · feed disconnects ${sm.feed_disconnects ?? "–"} · ${d.error ? "<span class='neg'>" + esc(d.error) + "</span>" : "no errors"}</div>
+    <div class="tbl"><table><thead><tr><th>Signal time</th><th>Kind</th><th>Side</th><th class="num">Price</th><th class="num">Level</th><th>Action</th><th>Reason</th></tr></thead><tbody>${d.signals.map(s => `<tr><td class="nw">${String(s.ts).replace("T", " ")}</td><td>${s.kind}</td><td>${s.side}</td><td class="num">${fmt(s.price)}</td><td class="num">${fmt(s.level)}</td><td>${s.action}</td><td>${esc(s.reason || "")}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No signals</td></tr>'}</tbody></table></div>
+    <div class="tbl" style="margin-top:8px"><table><thead><tr><th>Side</th><th class="num">Entry</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Cost</th><th class="num">Net</th><th class="num">Net %</th></tr></thead><tbody>${d.trades.map(t => `<tr><td>${t.side}</td><td class="num">${fmt(t.entry_price)}</td><td class="num">${fmt(t.target)}</td><td class="num">${t.stop ? fmt(t.stop) : "–"}</td><td class="num">${fmt(t.exit_price)}</td><td>${t.exit_reason || "open"}</td><td class="num">${fmt(t.gross_pnl)}</td><td class="num">${fmt(t.cost)}</td><td class="num ${cls(t.net_pnl)}">${fmt(t.net_pnl)}</td><td class="num ${cls(t.net_pct)}">${fmt(t.net_pct)}</td></tr>`).join("") || '<tr><td colspan="10" class="muted">No trades</td></tr>'}</tbody></table></div>`;
+}
+async function refresh() { try { const {data: s} = await api("/api/state"); renderRuns(s.runs); renderHist(s.history); } catch (e) {} }
+
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => lastRuns.forEach(r => { const cv = $("c" + r.id); if (cv) chart(cv, r); }), 150); });
+boot("runs", async () => { await initStrategyForm(calcPreview); calcPreview(); refresh(); every(refresh, 2000); });
+</script>
+</body>
+</html>

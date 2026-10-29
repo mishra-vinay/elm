@@ -1,0 +1,80 @@
+strategy,symbol,status,bars_in_state,last_close,atr_pct,avg_turnover_cr,exit_ref,exit_ref_label,liquid
+ema_cross_20_50_adx,KOTAKBANK,HOLD,47,435.0,2.26,872.5,409.91,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,COALINDIA,HOLD,12,409.35,2.1,315.7,416.95,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,ADANIPORTS,HOLD,11,1708.0,2.73,393.1,1744.64,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,DRREDDY,HOLD,4,1180.0,2.18,274.6,1196.13,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,DIVISLAB,HOLD,115,9361.0,2.3,462.9,8884.18,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,BOSCHLTD,HOLD,121,43155.0,2.8,112.2,45725.19,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,DLF,HOLD,77,636.95,2.72,292.3,657.33,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,NAUKRI,NEW EXIT,1,1182.8,3.54,183.7,1246.49,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,PNB,HOLD,51,115.29,2.43,160.6,114.06,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,TVSMOTOR,NEW EXIT,1,3839.4,2.72,297.6,4078.09,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,ZYDUSLIFE,HOLD,103,1112.0,2.86,185.9,1141.13,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,HAL,HOLD,118,4647.4,2.47,356.5,4743.96,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,PERSISTENT,HOLD,49,5468.0,2.84,233.5,5410.92,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,AUROPHARMA,HOLD,114,1645.0,2.22,134.3,1648.28,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50_adx,COFORGE,HOLD,91,1814.3,3.33,478.2,1780.23,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_10_30,KOTAKBANK,HOLD,6,435.0,2.26,872.5,415.03,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,COALINDIA,HOLD,22,409.35,2.1,315.7,417.12,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,ADANIPORTS,HOLD,19,1708.0,2.73,393.1,1750.96,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,DRREDDY,HOLD,12,1180.0,2.18,274.6,1193.12,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,DIVISLAB,HOLD,69,9361.0,2.3,462.9,9215.54,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,DLF,NEW EXIT,1,636.95,2.72,292.3,660.73,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,ICICIGI,HOLD,4,1624.0,2.48,146.5,1557.4,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,ZYDUSLIFE,HOLD,13,1112.0,2.86,185.9,1150.6,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,AUROPHARMA,HOLD,77,1645.0,2.22,134.3,1671.83,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_10_30,PAGEIND,HOLD,9,36450.0,2.49,88.9,36775.81,EMA30 level (exit when EMA10 closes below EMA30),True
+ema_cross_20_50,KOTAKBANK,HOLD,47,435.0,2.26,872.5,409.91,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,COALINDIA,HOLD,12,409.35,2.1,315.7,416.95,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,ADANIPORTS,HOLD,14,1708.0,2.73,393.1,1744.64,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,DRREDDY,HOLD,4,1180.0,2.18,274.6,1196.13,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,DIVISLAB,HOLD,115,9361.0,2.3,462.9,8884.18,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,BOSCHLTD,HOLD,121,43155.0,2.8,112.2,45725.19,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,DLF,HOLD,80,636.95,2.72,292.3,657.33,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,NAUKRI,NEW EXIT,1,1182.8,3.54,183.7,1246.49,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,PNB,HOLD,57,115.29,2.43,160.6,114.06,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,TVSMOTOR,NEW EXIT,1,3839.4,2.72,297.6,4078.09,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,ZYDUSLIFE,HOLD,120,1112.0,2.86,185.9,1141.13,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,HAL,HOLD,118,4647.4,2.47,356.5,4743.96,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,PERSISTENT,HOLD,56,5468.0,2.84,233.5,5410.92,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,AUROPHARMA,HOLD,151,1645.0,2.22,134.3,1648.28,EMA50 level (exit when EMA20 closes below EMA50),True
+ema_cross_20_50,COFORGE,HOLD,99,1814.3,3.33,478.2,1780.23,EMA50 level (exit when EMA20 closes below EMA50),True
+donchian_100_50,KOTAKBANK,HOLD,30,435.0,2.26,872.5,383.05,50-day low (exit on close below it),True
+donchian_100_50,JSWSTEEL,NEW EXIT,1,1175.2,2.46,200.4,1214.8,50-day low (exit on close below it),True
+donchian_100_50,HEROMOTOCO,NEW EXIT,1,4856.5,2.68,270.2,4968.0,50-day low (exit on close below it),True
+donchian_100_50,DIVISLAB,HOLD,103,9361.0,2.3,462.9,7350.5,50-day low (exit on close below it),True
+donchian_100_50,BOSCHLTD,HOLD,82,43155.0,2.8,112.2,39445.43,50-day low (exit on close below it),True
+donchian_100_50,GAIL,HOLD,81,167.7,2.13,117.7,166.44,50-day low (exit on close below it),True
+donchian_100_50,LODHA,HOLD,65,1065.6,3.66,234.1,1047.5,50-day low (exit on close below it),True
+donchian_100_50,NAUKRI,HOLD,51,1182.8,3.54,183.7,1180.3,50-day low (exit on close below it),True
+donchian_100_50,PNB,HOLD,40,115.29,2.43,160.6,109.37,50-day low (exit on close below it),True
+donchian_100_50,SIEMENS,HOLD,46,3639.0,2.9,95.8,3576.1,50-day low (exit on close below it),True
+donchian_100_50,TORNTPHARM,NEW EXIT,1,4617.1,2.38,173.3,4679.0,50-day low (exit on close below it),True
+donchian_100_50,TVSMOTOR,NEW EXIT,1,3839.4,2.72,297.6,3852.0,50-day low (exit on close below it),True
+donchian_100_50,ZYDUSLIFE,HOLD,102,1112.0,2.86,185.9,1086.0,50-day low (exit on close below it),True
+donchian_100_50,HAL,HOLD,107,4647.4,2.47,356.5,4491.0,50-day low (exit on close below it),True
+donchian_100_50,PERSISTENT,HOLD,28,5468.0,2.84,233.5,5162.0,50-day low (exit on close below it),True
+donchian_100_50,AUROPHARMA,HOLD,144,1645.0,2.22,134.3,1536.8,50-day low (exit on close below it),True
+donchian_100_50,COFORGE,HOLD,51,1814.3,3.33,478.2,1563.66,50-day low (exit on close below it),True
+donchian_100_50,BAJAJHLDNG,HOLD,48,10600.0,2.44,46.5,10415.0,50-day low (exit on close below it),True
+high52_trail3atr,DIVISLAB,HOLD,61,9361.0,2.3,462.9,,,True
+high52_trail3atr,ZYDUSLIFE,NEW EXIT,1,1112.0,2.86,185.9,,,True
+high52_trail3atr,AUROPHARMA,HOLD,73,1645.0,2.22,134.3,,,True
+supertrend_10_3,HDFCBANK,NEW EXIT,1,692.25,2.15,2400.9,,,True
+supertrend_10_3,ICICIBANK,HOLD,2,1349.0,1.67,1363.5,,,True
+supertrend_10_3,KOTAKBANK,HOLD,3,435.0,2.26,872.5,,,True
+supertrend_10_3,COALINDIA,HOLD,25,409.35,2.1,315.7,,,True
+supertrend_10_3,ADANIPORTS,HOLD,20,1708.0,2.73,393.1,,,True
+supertrend_10_3,DRREDDY,HOLD,13,1180.0,2.18,274.6,,,True
+supertrend_10_3,HDFCLIFE,HOLD,15,544.5,2.73,282.2,,,True
+supertrend_10_3,DIVISLAB,HOLD,121,9361.0,2.3,462.9,,,True
+supertrend_10_3,TRENT,HOLD,3,2876.3,2.6,308.8,,,True
+supertrend_10_3,DABUR,HOLD,14,376.8,2.1,91.3,,,True
+supertrend_10_3,DLF,HOLD,11,636.95,2.72,292.3,,,True
+supertrend_10_3,GAIL,HOLD,95,167.7,2.13,117.7,,,True
+supertrend_10_3,ICICIGI,HOLD,10,1624.0,2.48,146.5,,,True
+supertrend_10_3,IRCTC,HOLD,14,449.85,2.13,36.8,,,True
+supertrend_10_3,TORNTPHARM,NEW EXIT,1,4617.1,2.38,173.3,,,True
+supertrend_10_3,ZYDUSLIFE,NEW EXIT,1,1112.0,2.86,185.9,,,True
+supertrend_10_3,AUROPHARMA,HOLD,75,1645.0,2.22,134.3,,,True
+supertrend_10_3,PAGEIND,HOLD,12,36450.0,2.49,88.9,,,True

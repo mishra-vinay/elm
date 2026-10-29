@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market depth · Dry-run trading</title>
+<link rel="stylesheet" href="/static/app.css?v=7">
+<style>
+  #chDay { min-width:300px; } #chSel { min-width:200px; }
+  #chartBox { position:relative; } #chartBox canvas { height:auto; width:100%; background:var(--surface); }
+  .ladder td, .ladder th { white-space:nowrap; } .bidc { color:var(--green); } .askc { color:var(--red); }
+  .bar { height:10px; border-radius:2px; display:inline-block; vertical-align:middle; }
+  #tip { position:absolute; pointer-events:none; background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; display:none; z-index:3; white-space:nowrap; }
+</style>
+</head>
+<body>
+<div id="hdr"></div>
+<main id="app">
+  <section>
+    <h2>Depth recorder <span class="muted small">records every update of the 5 bid + 5 offer levels, all session, every weekday</span></h2>
+    <dl class="kvlist" id="stKv"></dl>
+    <div class="row" style="margin-top:10px">
+      <input id="dq" list="dhits" placeholder="Add an instrument to record, e.g. NATGASMINI NOV" style="max-width:380px" autocomplete="off">
+      <datalist id="dhits"></datalist>
+      <button class="primary" onclick="addTarget()">Record this</button>
+      <span class="muted small" id="addMsg"></span>
+    </div>
+    <div class="tbl" style="margin-top:8px"><table id="tgT"><thead><tr><th>Instrument</th><th>Id</th><th>Recording</th><th></th></tr></thead><tbody></tbody></table></div>
+    <div class="help">The recorder starts by itself Monday to Friday at 08:55 IST and stops at 23:59 (MCX closes at 23:30, or 23:55 when US daylight saving has ended).
+      It uses the Dhan token from the Settings page. Data is kept in <code>data/depth.db</code> on the server for 60 days. The exchange feed shows only 5 levels,
+      and orders can be placed and cancelled without trading, so a quantity jump is a hint, not proof of intent.</div>
+  </section>
+
+  <section>
+    <h2>Live order book <span class="muted small" id="ladNote"></span></h2>
+    <div class="row"><label style="margin:0">Instrument</label><select id="liveSel"></select></div>
+    <div class="tbl"><table class="ladder" id="ladT"><thead><tr><th class="num">Bid orders</th><th class="num">Bid qty</th><th class="num">Bid price</th><th class="num">Offer price</th><th class="num">Offer qty</th><th class="num">Offer orders</th></tr></thead><tbody></tbody></table></div>
+    <div class="small" id="ladSum"></div>
+  </section>
+
+  <section>
+    <h2>Price, volume and order book side by side</h2>
+    <div class="row">
+      <select id="chSel"></select>
+      <select id="chDay"></select>
+      <select id="chBucket"><option value="5">5 s</option><option value="10">10 s</option><option value="30" selected>30 s</option><option value="60">1 min</option><option value="300">5 min</option></select>
+      <label style="margin:0"><input type="checkbox" id="chLive" checked style="width:auto"> follow live</label>
+      <button onclick="loadChart()">Reload</button>
+      <a class="small" id="csvLink" href="#">Download this day (CSV)</a>
+      <span class="muted small" id="chNote"></span>
+    </div>
+    <div id="chartBox"><canvas id="cv"></canvas><div id="tip"></div></div>
+    <div class="help"><b>Panels, top to bottom:</b> price candles (triangles mark buckets with unusually large volume: green = price rose, red = fell) ·
+      volume traded in each bucket, split by who hit whom: green = bought at the offer (buyers aggressive), red = sold at the bid (sellers aggressive), grey = in between · quantity waiting at the 5 bid levels (green) and 5 offer levels (red) at the end of the bucket ·
+      imbalance = (bid - offer) / (bid + offer): above 0 means more buyers queued. Hover to read all values for one time; every panel shares the time axis.</div>
+  </section>
+  <section>
+    <h2>What price did after volume and queue demand <span class="muted small">for the day and bucket size chosen above</span></h2>
+    <div class="row"><label style="margin:0">Look ahead</label><select id="stH"><option value="1">1 bucket</option><option value="2">2 buckets</option><option value="5" selected>5 buckets</option><option value="10">10 buckets</option></select>
+      <span class="muted small" id="stNote"></span></div>
+    <div id="stSummary" style="margin:8px 0"></div>
+    <div class="tbl"><table id="stImb"><thead><tr><th>Queue at the end of a bucket</th><th class="num">Times</th><th class="num">Avg price change over the look-ahead (pts)</th><th class="num">Price rose</th></tr></thead><tbody></tbody></table></div>
+    <h2 style="margin-top:14px">Biggest volume spikes</h2>
+    <div class="tbl"><table id="stSp"><thead><tr><th>Time</th><th class="num">Volume</th><th class="num">x average</th><th class="num">Buyers hit offer</th><th class="num">Sellers hit bid</th><th class="num">Price move in bucket</th><th class="num">Imbalance</th><th class="num">Change afterwards</th></tr></thead><tbody></tbody></table></div>
+    <div class="help"><b>How to read it.</b> <i>Imbalance</i> = (quantity queued at the 5 bids - at the 5 offers) / total. <i>Buyers hit offer</i> = volume that traded at or above the best offer
+      (aggressive buying); <i>sellers hit bid</i> the opposite. Strong buying with price not rising, or a big bid queue that price falls through, is the kind of pattern to look for.
+      Treat these as descriptions of one day: with few buckets the averages are noisy, and a queue can be placed and pulled without trading. Collect several sessions before trusting any rule.</div>
+  </section>
+  <section id="activity"></section>
+</main>
+<script src="/static/common.js?v=13"></script>
+<script>
+let picked = null, series = null, W = 0, hoverX = null;
+const PAD = {l: 62, r: 14}, PANELS = [["price", 0.42], ["vol", 0.16], ["book", 0.24], ["imb", 0.18]], H = 640;
+const fmtN = x => x == null ? "–" : Number(x).toLocaleString("en-IN");
+const tgKey = t => t.segment + ":" + t.security_id;
+
+async function refreshStatus2() {
+  try {
+    const {data: s} = await api("/api/depth/status");
+    const age = s.last_packet_age;
+    $("stKv").innerHTML = `<dt>State</dt><dd>${s.fatal ? `<span class="neg">${esc(s.fatal)}</span>` : s.connected ? '<span class="pos">recording</span>' :
+      !s.has_token ? '<span class="warnc">no Dhan token: paste one on the Settings page</span>' : s.in_window ? '<span class="warnc">connecting…</span>' : 'waiting for the next session (' + s.window + ')'}</dd>
+      <dt>Packets</dt><dd>${fmtN(s.packets_since_start)} since the server started${age != null ? ` · last one ${age} s ago` : ""} · suspect: ${s.suspect} · dropped: ${s.dropped} · write errors: ${s.write_errors}</dd>
+      <dt>File</dt><dd>${s.db_mb} MB · kept ${s.retention_days} days · ${s.now} IST</dd>`;
+    $("tgT").querySelector("tbody").innerHTML = s.targets.map(t => `<tr><td>${esc(t.label)}</td><td>${tgKey(t)}</td>
+      <td>${t.enabled ? '<span class="badge ok">on</span>' : '<span class="badge">paused</span>'}</td>
+      <td><button onclick="toggleT('${t.segment}','${t.security_id}',${!t.enabled},'${esc(t.label).replace(/'/g, "")}')">${t.enabled ? "Pause" : "Resume"}</button>
+      <button class="danger" onclick="delT('${t.segment}','${t.security_id}')">Remove</button></td></tr>`).join("") || '<tr><td colspan="4" class="muted">Nothing is being recorded.</td></tr>';
+    for (const id of ["liveSel", "chSel"]) {
+      const sel = $(id), cur = sel.value;
+      const html = s.targets.map(t => `<option value="${t.security_id}">${esc(t.label)}</option>`).join("");
+      if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; if (cur) sel.value = cur; if (id === "chSel") loadDays(); }
+    }
+  } catch (e) {}
+}
+async function addTarget() {
+  if (!picked) { $("addMsg").textContent = "Pick an instrument from the list first."; return; }
+  await api("/api/depth/targets", {method: "POST", body: JSON.stringify({segment: picked.segment, security_id: picked.security_id, label: picked.name || picked.symbol, on: true})});
+  $("dq").value = ""; picked = null; $("addMsg").textContent = "Added; the feed reconnects within a few seconds."; refreshStatus2();
+}
+async function toggleT(seg, sid, on, label) { await api("/api/depth/targets", {method: "POST", body: JSON.stringify({segment: seg, security_id: sid, label, on})}); refreshStatus2(); }
+async function delT(seg, sid) { if (confirm("Stop recording this instrument? Stored data stays in the file.")) { await api(`/api/depth/targets?segment=${seg}&security_id=${sid}`, {method: "DELETE"}); refreshStatus2(); } }
+wireSearch("dq", "dhits", hit => { picked = hit; });
+
+async function refreshLadder() {
+  try {
+    const {data} = await api("/api/depth/latest"); const sid = $("liveSel").value, r = data[sid];
+    if (!r) { $("ladT").querySelector("tbody").innerHTML = '<tr><td colspan="6" class="muted">No packet yet.</td></tr>'; $("ladSum").textContent = ""; return; }
+    const mx = Math.max(1, ...r.bids.map(x => x.qty), ...r.asks.map(x => x.qty));
+    $("ladT").querySelector("tbody").innerHTML = r.bids.map((b, i) => { const a = r.asks[i];
+      return `<tr><td class="num">${b.orders}</td><td class="num bidc"><span class="bar" style="background:var(--green);width:${b.qty / mx * 80}px"></span> ${fmtN(b.qty)}</td><td class="num bidc"><b>${fmt(b.price)}</b></td>
+      <td class="num askc"><b>${fmt(a.price)}</b></td><td class="num askc">${fmtN(a.qty)} <span class="bar" style="background:var(--red);width:${a.qty / mx * 80}px"></span></td><td class="num">${a.orders}</td></tr>`; }).join("");
+    const b5 = r.bids.reduce((s, x) => s + x.qty, 0), a5 = r.asks.reduce((s, x) => s + x.qty, 0);
+    $("ladNote").textContent = "· " + r.ts + " IST";
+    $("ladSum").innerHTML = `Last <b>${fmt(r.ltp)}</b> · volume ${fmtN(r.volume)} · 5-level bid ${fmtN(b5)} vs offer ${fmtN(a5)} · imbalance <b class="${cls(b5 - a5)}">${b5 + a5 ? ((b5 - a5) / (b5 + a5)).toFixed(2) : "–"}</b> · total buy ${fmtN(r.tot_buy)} / sell ${fmtN(r.tot_sell)} · OI ${fmtN(r.oi)} · day ${fmt(r.day_low)} – ${fmt(r.day_high)}`;
+  } catch (e) {}
+}
+
+async function loadDays() {
+  const sid = $("chSel").value; if (!sid) return;
+  const {data} = await api("/api/depth/days?security_id=" + sid), sel = $("chDay"), cur = sel.value;
+  sel.innerHTML = data.map(d => `<option value="${d.date}">${d.date} · ${fmtN(d.rows)} rows · ${d.first}–${d.last}</option>`).join("") || '<option value="">no data yet</option>';
+  if (cur && data.some(d => d.date === cur)) sel.value = cur;
+  loadChart();
+}
+async function loadChart() {
+  const sid = $("chSel").value, day = $("chDay").value; if (!sid || !day) { series = null; draw(); return; }
+  $("csvLink").href = `/api/depth/export.csv?security_id=${sid}&day=${day}`;
+  const {data} = await api(`/api/depth/series?security_id=${sid}&day=${day}&bucket=${$("chBucket").value}`);
+  series = data.points; $("chNote").textContent = `${series.length} buckets`; draw(); loadStats();
+}
+
+function draw() {
+  const cv = $("cv"), dpr = window.devicePixelRatio || 1; W = cv.parentElement.clientWidth;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + "px";
+  const g = cv.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.body), col = n => css.getPropertyValue(n).trim() || "#888";
+  const green = col("--green"), red = col("--red"), ink = col("--ink2"), line = col("--line"), blue = col("--blue");
+  g.font = "11px system-ui"; g.textBaseline = "middle";
+  if (!series || !series.length) { g.fillStyle = ink; g.fillText("No recorded data for this selection yet.", PAD.l, 30); return; }
+  const t0 = series[0].t, t1 = series[series.length - 1].t, bms = +$("chBucket").value * 1000;
+  const X = t => PAD.l + (t - t0) / Math.max(1, t1 + bms - t0) * (W - PAD.l - PAD.r);
+  const bw = Math.max(1, (W - PAD.l - PAD.r) / series.length * 0.7);
+  let y0 = 8; const boxes = {};
+  for (const [name, frac] of PANELS) { const h = (H - 36) * frac; boxes[name] = [y0, y0 + h - 6]; y0 += h; }
+  const scaleY = (name, lo, hi) => { const [a, b] = boxes[name]; return v => b - (v - lo) / (hi - lo || 1) * (b - a); };
+  const frame = (name, lo, hi, fmtv) => { const [a, b] = boxes[name]; g.strokeStyle = line; g.strokeRect(PAD.l, a, W - PAD.l - PAD.r, b - a); g.fillStyle = ink; g.textAlign = "right";
+    for (let i = 0; i <= 3; i++) { const v = lo + (hi - lo) * i / 3, yy = b - (b - a) * i / 3; g.fillText(fmtv(v), PAD.l - 6, yy); g.strokeStyle = line; g.beginPath(); g.moveTo(PAD.l, yy); g.lineTo(W - PAD.r, yy); g.stroke(); } g.textAlign = "left"; };
+  // price
+  const lo = Math.min(...series.map(p => p.l)), hi = Math.max(...series.map(p => p.h)), pad = (hi - lo) * 0.05 || 0.1;
+  frame("price", lo - pad, hi + pad, v => v.toFixed(1)); const yp = scaleY("price", lo - pad, hi + pad);
+  const vols = series.map(p => p.vol || 0), mean = vols.reduce((a, b) => a + b, 0) / vols.length, sd = Math.sqrt(vols.reduce((a, b) => a + (b - mean) ** 2, 0) / vols.length), thr = mean + 2 * sd;
+  for (const p of series) { const x = X(p.t) + bw / 2, up = p.c >= p.o; g.strokeStyle = g.fillStyle = up ? green : red;
+    g.beginPath(); g.moveTo(x, yp(p.h)); g.lineTo(x, yp(p.l)); g.stroke(); g.fillRect(x - bw / 2, Math.min(yp(p.o), yp(p.c)), bw, Math.max(1, Math.abs(yp(p.o) - yp(p.c))));
+    if ((p.vol || 0) > thr && sd > 0) { const ty = yp(p.h) - 7; g.beginPath(); g.moveTo(x, ty); g.lineTo(x - 4, ty - 7); g.lineTo(x + 4, ty - 7); g.closePath(); g.fill(); } }
+  // volume
+  const vmax = Math.max(1, ...vols); frame("vol", 0, vmax, v => fmtN(Math.round(v))); const yv = scaleY("vol", 0, vmax), vb = boxes.vol[1];
+  for (const p of series) { const tot = p.vol || 0, b = Math.min(p.buyv, tot), sl = Math.min(p.sellv, tot - b), x = X(p.t);
+    g.fillStyle = green; g.fillRect(x, yv(b), bw, vb - yv(b)); g.fillStyle = red; g.fillRect(x, yv(b + sl), bw, yv(b) - yv(b + sl));
+    g.fillStyle = col("--muted"); g.fillRect(x, yv(tot), bw, yv(b + sl) - yv(tot)); }
+  // book
+  const bmax = Math.max(1, ...series.map(p => Math.max(p.bid5, p.ask5))); frame("book", 0, bmax, v => fmtN(Math.round(v))); const yb = scaleY("book", 0, bmax);
+  for (const [k, c] of [["bid5", green], ["ask5", red]]) { g.strokeStyle = c; g.lineWidth = 1.4; g.beginPath(); series.forEach((p, i) => { const x = X(p.t) + bw / 2; i ? g.lineTo(x, yb(p[k])) : g.moveTo(x, yb(p[k])); }); g.stroke(); g.lineWidth = 1; }
+  // imbalance
+  frame("imb", -1, 1, v => v.toFixed(1)); const yi = scaleY("imb", -1, 1), zero = yi(0);
+  for (const p of series) { g.fillStyle = p.imb >= 0 ? green : red; g.globalAlpha = 0.75; g.fillRect(X(p.t), Math.min(zero, yi(p.imb)), bw, Math.abs(yi(p.imb) - zero)); g.globalAlpha = 1; }
+  // time axis
+  g.fillStyle = ink; g.textAlign = "center";
+  const span = t1 + bms - t0, step = span > 6 * 3600e3 ? 3600e3 : span > 2 * 3600e3 ? 1800e3 : 600e3;
+  for (let t = Math.ceil(t0 / step) * step; t < t1 + bms; t += step) { const d = new Date(t + 19800e3), x = X(t); g.fillText(("0" + d.getUTCHours()).slice(-2) + ":" + ("0" + d.getUTCMinutes()).slice(-2), x, H - 10); }
+  g.textAlign = "left";
+  if (hoverX != null) { g.strokeStyle = blue; g.beginPath(); g.moveTo(hoverX, 4); g.lineTo(hoverX, H - 22); g.stroke(); }
+}
+
+async function loadStats() {
+  const sid = $("chSel").value, day = $("chDay").value; if (!sid || !day) return;
+  const {data: d} = await api(`/api/depth/stats?security_id=${sid}&day=${day}&bucket=${$("chBucket").value}&horizon=${$("stH").value}`);
+  if (!d.summary) { $("stSummary").innerHTML = '<span class="muted">Not enough data yet (needs at least 3 buckets).</span>'; $("stImb").querySelector("tbody").innerHTML = ""; $("stSp").querySelector("tbody").innerHTML = ""; return; }
+  const m = d.summary, cl = m.volume ? Math.round(100 * m.buy_aggr / m.volume) : 0, sl = m.volume ? Math.round(100 * m.sell_aggr / m.volume) : 0;
+  $("stNote").textContent = `${d.buckets} buckets of ${$("chBucket").selectedOptions[0].text}`;
+  $("stSummary").innerHTML = `<div class="row">
+    <div class="stat"><span>Volume</span><b>${fmtN(m.volume)}</b></div>
+    <div class="stat"><span>Buyers hit offer</span><b class="pos">${fmtN(m.buy_aggr)} (${cl}%)</b></div>
+    <div class="stat"><span>Sellers hit bid</span><b class="neg">${fmtN(m.sell_aggr)} (${sl}%)</b></div>
+    <div class="stat"><span>Net (buy - sell)</span><b class="${cls(m.net_delta)}">${fmtN(m.net_delta)}</b></div>
+    <div class="stat"><span>Average imbalance</span><b class="${cls(m.avg_imbalance)}">${m.avg_imbalance}</b></div>
+    <div class="stat"><span>Price</span><b>${fmt(m.price_open)} → ${fmt(m.price_close)}</b></div>
+    <div class="stat" title="correlation between net buying and the price change in the same bucket (-1..1)"><span>Net buying vs price move</span><b>${m.corr_delta_move ?? "–"}</b></div>
+    <div class="stat" title="correlation between the queue imbalance and the price change over the look-ahead (-1..1)"><span>Imbalance vs later move</span><b>${m.corr_imb_fwd ?? "–"}</b></div></div>`;
+  $("stImb").querySelector("tbody").innerHTML = d.imbalance.map(r => `<tr><td>${r.label}</td><td class="num">${r.n}</td><td class="num ${cls(r.mean_fwd)}">${r.mean_fwd == null ? "–" : r.mean_fwd}</td><td class="num">${r.pct_up == null ? "–" : r.pct_up + "%"}</td></tr>`).join("");
+  const hm = t => { const x = new Date(t + 19800e3); return ("0" + x.getUTCHours()).slice(-2) + ":" + ("0" + x.getUTCMinutes()).slice(-2) + ":" + ("0" + x.getUTCSeconds()).slice(-2); };
+  $("stSp").querySelector("tbody").innerHTML = d.spikes.map(r => `<tr><td>${hm(r.t)}</td><td class="num">${fmtN(r.vol)}</td><td class="num">${r.x_avg}x</td><td class="num bidc">${fmtN(r.buyv)}</td><td class="num askc">${fmtN(r.sellv)}</td>
+    <td class="num ${cls(r.move)}">${r.move}</td><td class="num">${r.imb}</td><td class="num ${cls(r.fwd)}">${r.fwd == null ? "–" : r.fwd}</td></tr>`).join("") || '<tr><td colspan="8" class="muted">No bucket stood out yet (a spike is more than 2 standard deviations above the average bucket).</td></tr>';
+}
+$("stH").addEventListener("change", loadStats);
+const cvEl = $("cv");
+cvEl.addEventListener("mousemove", e => {
+  if (!series || !series.length) return;
+  const r = cvEl.getBoundingClientRect(), x = e.clientX - r.left; hoverX = x; draw();
+  const bms = +$("chBucket").value * 1000, t0 = series[0].t, t1 = series[series.length - 1].t + bms;
+  const t = t0 + (x - PAD.l) / (W - PAD.l - PAD.r) * (t1 - t0), p = series.find(q => t >= q.t && t < q.t + bms);
+  const tip = $("tip"); if (!p) { tip.style.display = "none"; return; }
+  const d = new Date(p.t + 19800e3), hh = ("0" + d.getUTCHours()).slice(-2) + ":" + ("0" + d.getUTCMinutes()).slice(-2) + ":" + ("0" + d.getUTCSeconds()).slice(-2);
+  tip.innerHTML = `<b>${hh}</b> · ${p.n} updates<br>O ${p.o} H ${p.h} L ${p.l} C ${p.c}<br>volume <b>${fmtN(p.vol)}</b> (buy-aggr <span class="bidc">${fmtN(p.buyv)}</span> / sell-aggr <span class="askc">${fmtN(p.sellv)}</span>)<br>bid ${p.bid} × ${fmtN(p.b1q)} · offer ${p.ask} × ${fmtN(p.a1q)}<br>
+    5-level bid <span class="bidc">${fmtN(p.bid5)}</span> vs offer <span class="askc">${fmtN(p.ask5)}</span><br>imbalance <b>${p.imb}</b>`;
+  tip.style.display = "block"; tip.style.left = Math.min(x + 14, W - 230) + "px"; tip.style.top = "30px";
+});
+cvEl.addEventListener("mouseleave", () => { hoverX = null; $("tip").style.display = "none"; draw(); });
+window.addEventListener("resize", draw);
+$("chSel").addEventListener("change", loadDays); $("chDay").addEventListener("change", loadChart); $("chBucket").addEventListener("change", loadChart);
+boot("depth", () => {
+  refreshStatus2(); refreshLadder();
+  every(refreshStatus2, 5000); every(refreshLadder, 2000);
+  every(() => { if ($("chLive").checked && $("chDay").value === new Date(Date.now() + 19800e3).toISOString().slice(0, 10)) loadChart(); }, 15000);
+});
+</script>
+</body>
+</html>

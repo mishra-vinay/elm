@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depth research · Dry-run trading</title>
+<link rel="stylesheet" href="/static/app.css?v=7">
+<style>
+  .bad2 { color: var(--red); } .good2 { color: var(--green); font-weight: 600; }
+  #rsT th { cursor: pointer; white-space: nowrap; } #rsT td { white-space: nowrap; overflow-wrap: normal; }
+  tr.flag td { background: rgba(11,138,79,.10); }
+</style>
+</head>
+<body>
+<div id="hdr"></div>
+<main id="app">
+  <section>
+    <h2>Test order-book and volume ideas on the recorded depth data</h2>
+    <div class="help" style="margin-top:0">Each idea is turned into a fixed rule, "traded" against the recorded best bid and offer (a long buys at the offer and sells at the bid, so the spread is paid)
+      plus a round-trip fee, and judged on the first half of the recorded days against the second half. <b>39 variants</b> are tested, so a few will look good by chance:
+      a rule is flagged only if it is positive in both halves, has 20+ trades in each, |t| ≥ 3, and wins on at least 60% of its days. With one recorded day nothing can be flagged.
+      This is research on recorded data, not advice, and no orders are ever sent.</div>
+    <div class="row" style="margin-top:10px">
+      <div><label>Instrument</label><select id="rsSid"></select></div>
+      <div><label>Bar size</label><select id="rsBar"><option value="10" selected>10 s</option><option value="30">30 s</option><option value="60">1 min</option></select></div>
+      <div><label>Round-trip fee %</label><input id="rsFee" type="number" step="0.01" value="0.06" style="width:90px"></div>
+      <div><label>Stop (ticks)</label><input id="rsStop" type="number" step="1" value="8" style="width:90px"></div>
+      <div style="align-self:end"><button class="primary" id="rsGo" onclick="runResearch()">Run the tests</button></div>
+      <div style="align-self:end" class="small muted" id="rsMsg"></div>
+    </div>
+    <div class="small" style="margin-top:6px"><a href="/api/depth/research/report.md">Download the report (Markdown)</a> · <a href="/api/depth/research/trades.csv">Download every simulated trade (CSV)</a></div>
+  </section>
+  <section>
+    <h2>Results <span class="muted small" id="rsMeta"></span></h2>
+    <div id="rsSum" style="margin-bottom:8px"></div>
+    <div class="tbl"><table id="rsT"><thead><tr>
+      <th data-k="rule">Rule</th><th class="num" data-k="n">Trades</th><th class="num" data-k="days">Days (+ / traded)</th><th class="num" data-k="mean" title="average result per trade after spread and fee, in percent of price">Avg net %</th>
+      <th class="num" data-k="win">Win %</th><th class="num" data-k="pf" title="profit factor: total wins / total losses">PF</th><th class="num" data-k="t" title="average divided by its standard error; about 2 is common by chance among many tests">t</th>
+      <th class="num" data-k="tr">Train avg % (n)</th><th class="num" data-k="te">Test avg % (n)</th><th data-k="verdict">Verdict</th></tr></thead><tbody></tbody></table></div>
+    <div class="help">Click a column to sort. <b>flow</b> = net aggressive volume (buyers hitting the offer minus sellers hitting the bid) as a share of volume over 3 minutes; <b>queue</b> = how lopsided the 5 bid and 5 offer levels are;
+      <b>absorption</b> = a volume spike where price does not move; <b>spike</b> = a volume spike with a 2+ tick move; <b>level</b> = the same signals near the previous day's High or Low (needs a recorded previous day).
+      "-follow / -with" goes along with the signal, "-fade / -against" goes the other way.</div>
+  </section>
+  <section id="activity"></section>
+</main>
+<script src="/static/common.js?v=13"></script>
+<script>
+let rows = [], sortK = "t", sortDir = -1, polling = null;
+const f3 = x => x == null ? "–" : Number(x).toFixed(3);
+async function loadTargets() {
+  const {data: s} = await api("/api/depth/status");
+  $("rsSid").innerHTML = s.targets.map(t => `<option value="${t.security_id}">${esc(t.label)}</option>`).join("");
+}
+async function runResearch() {
+  $("rsGo").disabled = true;
+  try {
+    const r = await api("/api/depth/research", {method: "POST", body: JSON.stringify({security_id: $("rsSid").value, bar_seconds: +$("rsBar").value, fee_pct: +$("rsFee").value, stop_ticks: +$("rsStop").value})});
+    $("rsMsg").textContent = r.status === 409 ? "A run is already in progress." : "Started…";
+    startPolling();
+  } catch (e) { $("rsMsg").textContent = e.message; $("rsGo").disabled = false; }
+}
+function startPolling() { if (!polling) polling = setInterval(refresh, 2000); }
+async function refresh() {
+  const {data: d} = await api("/api/depth/research");
+  $("rsGo").disabled = d.running;
+  if (d.running) { $("rsMsg").textContent = "Running (low priority, so the live recording is not slowed)… started " + d.started; startPolling(); }
+  else { if (polling) { clearInterval(polling); polling = null; } $("rsMsg").textContent = d.error ? "Failed: " + d.error : d.finished ? "Last run finished " + d.finished : "Not run yet."; }
+  if (d.result) show(d.result);
+}
+function show(r) {
+  rows = r.results.map(x => ({rule: x.rule, n: x.full.n || 0, days: x.full.days || 0, days_pos: x.full.days_pos || 0, mean: x.full.mean, win: x.full.win, pf: x.full.pf, t: x.full.t, trn: x.train, tst: x.test,
+    tr: x.train.mean, te: x.test.mean, verdict: x.verdict, mode: x.mode}));
+  const flagged = rows.filter(x => x.verdict === "WORTH A CLOSER LOOK").length, n = r.days.length;
+  $("rsMeta").textContent = `· ${n} day(s) recorded (${r.days.join(", ") || "none"}) · ${r.bar_s} s bars · fee ${r.fee_pct}% · stop ${r.stop_ticks} ticks`;
+  $("rsSum").innerHTML = n < 2 ? `<span class="warnc"><b>Only ${n} day recorded</b>: nothing can be judged yet. Check again after about 10 sessions.</span>`
+    : flagged ? `<span class="good2">${flagged} of ${rows.length} variants pass all the checks.</span> With this many variants expect a few false positives: re-test them on days recorded later.`
+    : `<b>No variant passes all the checks</b> (${rows.length} tested).`;
+  draw();
+}
+function draw() {
+  const v = x => { const val = x[sortK]; return val == null ? -Infinity : val; };
+  const s = [...rows].sort((a, b) => sortK === "rule" || sortK === "verdict" ? sortDir * String(a[sortK]).localeCompare(String(b[sortK])) : sortDir * (v(a) - v(b)));
+  $("rsT").querySelector("tbody").innerHTML = s.map(x => x.n === 0 ? `<tr><td>${esc(x.rule)}</td><td class="num">0</td><td colspan="8" class="muted">no trades</td></tr>` :
+    `<tr class="${x.verdict === "WORTH A CLOSER LOOK" ? "flag" : ""}"><td>${esc(x.rule)}</td><td class="num">${x.n}</td><td class="num">${x.days_pos}/${x.days}</td>
+     <td class="num ${cls(x.mean)}">${f3(x.mean)}</td><td class="num">${x.win == null ? "–" : x.win.toFixed(0)}</td><td class="num">${x.pf == null ? "∞" : x.pf.toFixed(2)}</td><td class="num">${x.t == null ? "–" : x.t.toFixed(1)}</td>
+     <td class="num ${cls(x.tr)}">${f3(x.tr)} (${x.trn.n || 0})</td><td class="num ${cls(x.te)}">${f3(x.te)} (${x.tst.n || 0})</td><td class="${x.verdict === "WORTH A CLOSER LOOK" ? "good2" : ""}">${esc(x.verdict)}</td></tr>`).join("");
+}
+$("rsT").querySelector("thead").addEventListener("click", e => { const k = e.target.dataset && e.target.dataset.k; if (!k) return; sortDir = sortK === k ? -sortDir : -1; sortK = k; draw(); });
+boot("depthres", () => { loadTargets(); refresh(); });
+</script>
+</body>
+</html>

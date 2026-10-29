@@ -1,0 +1,15 @@
+# docker compose -f deploy/docker-compose.yml up -d --build
+# The container listens on 0.0.0.0, so DASHBOARD_PASSWORD (in ../.env) is required: the app refuses to start without it.
+# The port is published on the host's loopback only: reach it through an SSH tunnel or an HTTPS reverse proxy.
+services:
+  dryrun:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    env_file: ../.env
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_URL: sqlite:////data/dryrun.db
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["dryrun-data:/data"]
+    restart: unless-stopped
+volumes:
+  dryrun-data:
