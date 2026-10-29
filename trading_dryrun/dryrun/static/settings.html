@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings · Dry-run trading</title>
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=7">
 </head>
 <body>
 <div id="hdr"></div>
@@ -25,6 +25,16 @@
     <div class="small" id="tokMsg" style="margin-top:6px"></div>
   </section>
 
+  <section id="tickBox">
+    <h2>Stored ticks (raw price updates)</h2>
+    <p class="small muted" style="margin-top:0">Every distinct price update is saved with its arrival time (to the microsecond), roughly one to a few rows per second per instrument.
+      Old ticks are deleted automatically so the database stays small. Download a day first if you want to keep it; candles, runs and trades are never touched.</p>
+    <div class="row"><label style="margin:0">Keep raw ticks for</label><input id="ret" type="number" min="1" max="365" style="width:80px"> <span class="small muted">days</span>
+      <button class="primary" onclick="saveRetention()">Save</button>
+      <button class="danger" onclick="purgeNow()" title="delete everything older than the number of days above">Delete older ticks now</button><span class="small" id="retMsg"></span></div>
+    <div class="tbl" style="margin-top:10px"><table id="tdT"><thead><tr><th>Day</th><th>Instrument</th><th class="num">Rows</th><th>First</th><th>Last</th><th></th></tr></thead><tbody></tbody></table></div>
+  </section>
+
   <section><h2>Configuration (read-only; edit <code>.env</code> on the server to change)</h2>
     <dl class="kvlist" id="cfg"></dl>
     <h2 style="margin-top:14px">Session times (IST)</h2>
@@ -34,7 +44,7 @@
 
   <section id="activity"></section>
 </main>
-<script src="/static/common.js?v=2"></script>
+<script src="/static/common.js?v=12"></script>
 <script>
 const tokenText = t => !t.set ? '<span class="neg">not set</span>' : t.expires_at == null ? "set (expiry could not be read from the token)" :
   `<span class="${t.status === "valid" ? "pos" : t.status === "expired" ? "neg" : "warnc"}">${t.status}</span> · expires ${t.expires_at} IST` + (t.seconds_left > 0 ? ` (in ${Math.floor(t.seconds_left / 3600)} h ${Math.floor(t.seconds_left % 3600 / 60)} min)` : "");
@@ -44,10 +54,32 @@ async function load() {
     <dt>Client ID</dt><dd>${s.client_id || "<span class='muted'>not set</span>"}</dd><dt>Access token</dt><dd>${tokenText(s.token)}</dd>`;
   $("tokenBox").style.display = s.mode === "dhan" ? "" : "none";
   if (s.mode !== "dhan") $("testBtn").disabled = true;
-  $("cfg").innerHTML = `<dt>Feed packet</dt><dd>${s.feed_packet}</dd><dt>Store raw ticks</dt><dd>${s.store_ticks ? "yes, kept " + s.tick_retention_days + " days" : "no"}</dd>
+  $("cfg").innerHTML = `<dt>Feed packet</dt><dd>${s.feed_packet}</dd><dt>Store raw ticks</dt><dd>${s.store_ticks ? "yes, kept " + s.tick_retention_days + " day(s) (change above)" : "no"}</dd>
     <dt>Stale-feed limit</dt><dd>${s.stale_tick_seconds} s (entries are rejected if the feed was silent that long)</dd><dt>Database</dt><dd>${s.database}</dd>
     <dt>Login</dt><dd>${s.auth_mode}</dd><dt>.env file on server</dt><dd>${s.env_file_present ? "found" : "not found (token can only be kept in memory)"}</dd><dt>Version</dt><dd>${s.version}</dd>`;
   $("sess").querySelector("tbody").innerHTML = Object.entries(s.sessions).map(([k, v]) => `<tr><td>${k}</td><td>${v.open}</td><td>${v.last_entry}</td><td>${v.square_off}</td><td>${v.close}</td></tr>`).join("");
+}
+async function loadTickDays() {
+  try {
+    const {data} = await api("/api/ticks/days"); $("ret").value = data.retention_days;
+    $("tdT").querySelector("tbody").innerHTML = data.days.map(r => `<tr><td class="nw">${r.date}</td><td>${esc(r.symbol)} (${r.segment})</td><td class="num">${r.rows.toLocaleString()}</td><td class="nw">${String(r.first).slice(11, 19)}</td><td class="nw">${String(r.last).slice(11, 19)}</td>
+      <td class="nw"><a href="/api/ticks/export.csv?day=${r.date}&instrument_id=${r.instrument_id}"><button>Download CSV</button></a> <button class="danger" onclick="delDay('${r.date}', ${r.instrument_id}, '${esc(r.symbol)}')">Delete</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">No ticks stored.</td></tr>';
+  } catch (e) {}
+}
+async function saveRetention() {
+  try { await api("/api/settings/ticks", {method: "POST", body: JSON.stringify({retention_days: Number($("ret").value)})}); $("retMsg").className = "small pos"; $("retMsg").textContent = "saved; applied at the next clean-up (every 6 hours) or press Delete older ticks now"; load(); }
+  catch (e) { $("retMsg").className = "small neg"; $("retMsg").textContent = e.message; }
+}
+async function purgeNow() {
+  const n = Number($("ret").value);
+  if (!confirm(`Delete all stored ticks older than ${n} day(s)? Download them first if you want to keep them. This cannot be undone.`)) return;
+  try { const {data} = await api("/api/ticks?older_than_days=" + n, {method: "DELETE"}); $("retMsg").className = "small pos"; $("retMsg").textContent = `deleted ${data.deleted.toLocaleString()} ticks`; loadTickDays(); }
+  catch (e) { $("retMsg").className = "small neg"; $("retMsg").textContent = e.message; }
+}
+async function delDay(day, id, sym) {
+  if (!confirm(`Delete the stored ticks of ${sym} on ${day}? Download them first if you want to keep them. This cannot be undone.`)) return;
+  try { const {data} = await api(`/api/ticks?day=${day}&instrument_id=${id}`, {method: "DELETE"}); $("retMsg").className = "small pos"; $("retMsg").textContent = `deleted ${data.deleted.toLocaleString()} ticks`; loadTickDays(); }
+  catch (e) { $("retMsg").className = "small neg"; $("retMsg").textContent = e.message; }
 }
 async function testDhan() {
   $("testMsg").className = "small muted"; $("testMsg").textContent = "asking Dhan…";
@@ -67,7 +99,7 @@ async function setToken() {
     load(); refreshActivity();
   } catch (e) { $("tokMsg").className = "small neg"; $("tokMsg").textContent = e.message; }
 }
-boot("settings", () => { load(); every(load, 30000); });
+boot("settings", () => { load(); loadTickDays(); every(load, 30000); });
 </script>
 </body>
 </html>

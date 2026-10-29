@@ -19,7 +19,7 @@ async function api(path, opts) {
   return {status: r.status, data};
 }
 
-const NAV = [["runs", "/", "Dry runs"], ["market", "/market-data", "Market data"], ["settings", "/settings", "Settings"]];
+const NAV = [["runs", "/", "Dry runs"], ["ticks", "/ticks", "Live ticks"], ["depth", "/depth", "Depth"], ["backtest", "/backtest", "Backtest"], ["strategies", "/strategies", "Strategies"], ["market", "/market-data", "Market data"], ["settings", "/settings", "Settings"]];
 function renderHeader(active) {
   $("hdr").innerHTML = `<header><h1>Dry-run trading</h1>
     <nav>${NAV.map(([k, h, t]) => `<a href="${h}" class="${k === active ? "on" : ""}">${t}</a>`).join("")}</nav>
@@ -91,12 +91,48 @@ async function refreshActivity() {
   } catch (e) {}
 }
 
-// page = "runs" | "market" | "settings"; onReady runs once the user is logged in (or no login is needed)
+// page = "runs" | "ticks" | "backtest" | "market" | "settings"; onReady runs once the user is logged in (or no login is needed)
 async function boot(page, onReady) {
   renderHeader(page);
   const a = await (await fetch("/api/auth/status")).json(); authMode = a.mode;
   if (!a.authenticated) { showLogin(); return; }
   refreshStatus(); every(refreshStatus, 2000);
-  initActivity();
+  if ($("activity")) initActivity();             // not every page shows the activity log
   onReady();
+}
+
+// ---- strategy form shared by the Dry runs and Backtest pages. Strategies and their settings come from /api/strategies, so nothing here names a strategy.
+const STRAT = {list: [], none: true, onChange: null};
+const curStrat = () => STRAT.list.find(x => x.name === ($("s_name") || {}).value);
+function fieldHtml(f) {
+  const id = "so_" + f.key, tip = f.help ? ` title="${esc(f.help)}"` : "";
+  if (f.type === "select") return `<div><label${tip}>${esc(f.label)}</label><select id="${id}">${(f.choices || []).map(([v, t]) => `<option value="${esc(v)}"${String(v) === String(f.default) ? " selected" : ""}>${esc(t)}</option>`).join("")}</select></div>`;
+  return `<div><label${tip}>${esc(f.label)}</label><input id="${id}" type="${f.type === "number" ? "number" : "text"}"${f.step ? ` step="${f.step}"` : ""} value="${esc(f.default ?? "")}"></div>`;
+}
+function renderStrategyFields() {
+  const spec = curStrat(); $("s_fields").innerHTML = spec ? spec.fields.map(fieldHtml).join("") : "";
+  if ($("s_blurb")) $("s_blurb").textContent = spec ? spec.blurb || "" : "";
+  if (STRAT.onChange) STRAT.onChange();
+}
+async function initStrategyForm(onChange) {
+  STRAT.onChange = onChange; const {data} = await api("/api/strategies"); STRAT.list = data.strategies; STRAT.none = !STRAT.list.length;
+  const box = $("stratBox");
+  if (STRAT.none) { box.innerHTML = `<div class="help"><b>${esc(data.message || "No strategy is installed yet.")}</b><br>The feed, ticks, market data and settings pages work as usual. Once a strategy is added, its settings appear here.</div>`; if (onChange) onChange(); return; }
+  box.innerHTML = `<div class="row" style="margin:2px 0 8px;align-items:flex-end"><div style="min-width:260px"><label>Strategy</label><select id="s_name">${STRAT.list.map(x => `<option value="${esc(x.name)}">${esc(x.label)}</option>`).join("")}</select></div></div><div class="small muted" id="s_blurb" style="margin:0 0 8px;max-width:900px"></div><div class="grid" id="s_fields"></div>`;
+  $("s_name").addEventListener("change", renderStrategyFields);
+  const changed = () => { if (STRAT.onChange) STRAT.onChange(); };
+  box.addEventListener("input", changed); box.addEventListener("change", changed);
+  renderStrategyFields();
+}
+function strategyParams() {
+  const spec = curStrat(); if (!spec) return null; const options = {};
+  spec.fields.forEach(f => { const v = $("so_" + f.key).value; options[f.key] = f.type === "number" ? (v === "" ? null : Number(v)) : v; });
+  return {strategy: spec.name, options};
+}
+const optionsText = p => { const o = p.options && Object.keys(p.options).length ? p.options : null; return (p.strategy || "–") + (o ? ": " + Object.entries(o).map(([k, v]) => `${k}=${v}`).join(", ") : ""); };
+function renderPreview(box, d) {
+  if (d.error) { box.innerHTML = `<span class="neg">${esc(d.error)}</span>`; return; }
+  if (!d.summary && !(d.cards || []).length) { box.innerHTML = '<span class="muted">This strategy has no calculation preview.</span>'; return; }
+  box.innerHTML = (d.summary ? `<div class="small">${d.summary}</div>` : "") + `<div class="calcgrid">${(d.cards || []).map(c => `<div class="calcCard"><div><b>${esc(c.title)}</b></div><dl class="kvlist small" style="margin-top:4px">${c.rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl></div>`).join("")}</div>` +
+    (d.notes || []).map(n => `<div class="small muted" style="margin-top:6px">${n}</div>`).join("");
 }

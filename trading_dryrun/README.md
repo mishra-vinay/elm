@@ -1,27 +1,26 @@
 # Dry-run trading system (Phase 1)
 
-Dhan live market data → previous-day High/Low break-and-pullback rule → **simulated** trades saved in a database,
-with a small dashboard to start and watch runs. Built for your own account, single user, on a small server.
+Dhan live market data → pluggable strategy engine → **simulated** trades saved in a database, with a small dashboard to watch the feed,
+collect market data, run dry runs and backtest. One strategy is installed, **Range thirds** ([study](../docs/range-thirds-study.md): no profitable setting found, so it is for collecting evidence);
+others can be added (see [Adding a strategy](#adding-a-strategy)). Built for your own account, single user, on a small server.
 
 **It never sends orders.** There is no order-placement code anywhere in this package, only market-data reads.
 
-> **Read this first.** The rule was backtested on silver futures, silver options and Bajaj Finance shares and showed
-> **no edge** in any of them ([silver](../docs/silver-options-study.md), [Bajaj Finance](../docs/bajajfinance-study.md)).
-> This system is how you collect your own live evidence on the instruments you care about. The default settings are the
-> values that were tested, not recommendations, and a good-looking week of dry-run results is not proof.
+> **Read this first.** A good-looking week of dry-run results is not proof of an edge. Judge a strategy on many trades, on data it was not tuned on,
+> after realistic costs (the Backtest page shows trade count, t-statistic and first-half / second-half agreement for exactly that reason).
 
 ## What is in it
 
 | Piece | File | Notes |
 |---|---|---|
-| Strategy engine | `dryrun/strategy.py` | Pure logic. The dry run **and** the historical replay use the same class. |
+| Strategy framework | `dryrun/strategy.py`, `dryrun/strategies/` | The generic trade mechanics (fills, slippage, costs, limits, risk gate) and a registry. The dry run, the replay and the backtest all build the same engine. Installed: `strategies/range_thirds.py`. |
 | Risk gate | `dryrun/risk.py` | Independent approval before every entry (stale feed, session window), plus daily-loss and trade-count limits in the engine. Every check is logged. |
 | Dhan WebSocket feed | `dryrun/dhan_feed.py` | Binary v2 protocol parser, subscribe, auto-reconnect, token-expiry handling. |
 | Dhan REST (data only) | `dryrun/dhan_rest.py` | Daily and intraday history, 85-day chunks, timestamp-format auto-detection. |
 | Instrument list | `dryrun/instruments.py` | Downloads Dhan's scrip master (about 25,000 tradable rows kept: indices, stocks, index/stock futures, MCX futures). Search by name, symbol, security id or `SEGMENT:ID`. |
 | Previous-day High/Low | `dryrun/levels.py` | Manual entry → stored daily candle → derived from stored intraday candles → fetched from Dhan → ask you. |
 | Runner | `dryrun/runner.py` | Feed → candles/ticks → engine → database (writes go through one background thread so the feed never waits on disk). |
-| Dashboard + API | `dryrun/app.py`, `dryrun/static/index.html` | Plain HTML/JS, no build step. |
+| Dashboard + API | `dryrun/app.py`, `dryrun/static/*.html` | Dry runs, Live ticks, Backtest, Market data and Settings pages; plain HTML/JS, no build step. |
 | History download / replay | `dryrun/history.py`, `dryrun/replay.py` | Fill the database from Dhan; run the live engine over stored candles. |
 | Optional login | `dryrun/auth.py` | None, shared password, or e-mail code via Brevo (scaffolded, off by default). |
 
@@ -37,8 +36,7 @@ python -m pytest tests -q       # 50 tests
 ```
 
 In simulated mode prices are a seeded random walk, market hours are ignored and the page is labelled **SIMULATED FEED**,
-so you can try the whole flow at any time. Try: type `BAJFINANCE`, set the Pullback/Target to `0.05`/`0.15` and, when
-asked, previous High `960.5` / Low `955`. The engine will break, pull back, enter, hit the target and save everything within a minute.
+so you can try the feed, Live ticks and Market data pages at any time. (Starting a dry run needs a strategy; see below.) The engine will break, pull back, enter, hit the target and save everything within a minute.
 
 ## Using real Dhan data
 
@@ -61,20 +59,91 @@ stop the retry loop and show *feed error* on the dashboard instead of hammering 
 > high/low), not the exchange's complete order-book feed, which is a separate paid product. It is plenty for a High/Low rule, but
 > measure its latency and gaps during the dry run (the dashboard shows seconds since the last message, and every run records data coverage).
 
-## The rule
+## Adding a strategy
 
-Previous-session High **H** and Low **L**, from the database or typed in. Settings are per run:
+Two strategies ship (`range_thirds`, `prev_day_zone30`), plus a hidden research version of the first. A strategy is a small class that says *when to enter and where the stop and target are*; everything else (one open position,
+slippage, a limit target and market stop, round-trip costs, the daily loss limit, trade-count limits, the risk gate, square-off, the run summary, signals
+and trades saved to the database, the replay and the online backtest) is shared in `StrategyEngine`.
 
-* **Break** — price trades above **H** (or below **L**), optionally by a buffer.
-* **Entry** — after a break, price comes back `pullback %` inside the level (below **H** for a buy, above **L** for a sell). That tick is the signal.
-  `0` means "retest of the level". One entry per break; trying again needs a fresh break.
-* **Exit** — `target %` from entry (limit: fills at the target price), optional `stop %` (market: fills at the tick that crossed it, less slippage),
-  or **square-off** at 15:15 (equities/indices/NSE futures) or 23:15 (MCX).
-* **Limits** — one position at a time by default, max trades per day, daily loss limit (% of entry value, summed), entries only inside the session.
-* **Costs** — slippage per side and a round-trip cost % are charged, so P&L is net, not gross.
+1. Create `dryrun/strategies/my_strategy.py`: subclass `StrategyEngine`, implement `evaluate(ts, price)` (it is called on every tick, after any open position
+   has been managed; return a list of `Event`s and open a trade with `self.signal(side, ts, price, level, reason, exits)`), optionally `levels()` (chart lines),
+   `status_text()` and `describe_event()`. Keep its numbers in a `RULES` dict at the top of the file (there is no settings form: to change a number, edit the file). Register it with
+   `register(StrategySpec(name, label, engine, blurb="one plain-English paragraph", preview=..., describe=...))`.
+2. Import it in `dryrun/strategies/__init__.py`.
+3. Restart the service. The strategy appears in the Dry runs and Backtest pages with its `blurb` under the dropdown, and the calculation panel comes from `preview`. (`hidden=True` keeps a research strategy out of the dropdowns.)
 
-Every break and every entry signal is saved with its time, price, level, whether it was **taken or skipped**, and why
-("a position is already open", "max trades per day reached", "risk: stale feed…").
+`dryrun/strategies/range_thirds.py` is a complete, short example (RULES, a geometry function, one engine class), and `tests/demo_strategy.py` a smaller one used only by the tests. Replay from the command line:
+`python -m dryrun.replay --symbol BAJFINANCE --strategy NAME --option KEY=VALUE --interval 1m --from ... --to ...`.
+
+Every signal (taken or skipped, and why: "a position is already open", "max trades per day reached", "risk: stale feed…") is saved with its time, price and level.
+
+## Monitoring the feed (Live ticks page) and tick hygiene
+
+* **Live ticks page (`/ticks`)**: per instrument, packets per second, silence time, distinct vs duplicate vs out-of-order vs bad packets,
+  the shortest exchange-to-arrival delay, and how many microseconds *our* code spends per packet. The feed panel shows connection state,
+  reconnects, the websocket round trip to Dhan and the database writer queue. All counters are in memory, so the page is nearly free.
+* **Packet filtering** (`runner._process_packet`): identical repeats and packets older than one already processed are skipped (the quote feed repeats
+  snapshots on every depth change, about 90% of packets in a live check). A jump of more than 20% is held until the next *distinct* tick: if it agrees,
+  the move was real and both are used; if the price falls back, the jump is dropped as a bad print. A new trading day forgets yesterday's price.
+* **Stale-feed check is per instrument** and counts every packet, even skipped duplicates, as proof the feed is alive.
+* **Restart safety**: a run that was live when the process died is marked `interrupted`, and any open simulated trade is closed at the run's last stored price
+  with exit reason `interrupted` (flagged, P&L from that price).
+* **Keep-alive**: the websocket pings Dhan every 15 s and reconnects if there is no reply within 20 s (`DhanFeed(ping_interval, ping_timeout)`).
+* **Stored ticks** (Settings page): only distinct ticks are stored. Raw ticks are deleted after *N* days (default 3, saved in the database, overrides
+  `TICK_RETENTION_DAYS`). Download any day as CSV first; delete a day or everything older than *N* days from the same table.
+
+## Position sizing: the maximum loss decides the quantity
+
+Nobody enters a quantity. Both strategies carry `RULES["max_loss_rs"]` (Rs 10,000) and size every trade: `units = floor(max loss / (stop distance + exit slippage + round-trip cost) / lot size) x lot size`
+(`dryrun/sizing.py`; lot sizes of the MCX contracts in use are in `LOT_SIZES`, other instruments are sized in single units). If even one lot would lose more than the maximum, the trade is not taken.
+The trade list shows the quantity chosen. A stop-out then costs at most the maximum loss when the stop fills near its level; a gap far through the stop can lose more. Set `max_loss_rs` to `None`
+in a strategy file to use a run's fixed quantity instead.
+
+## Range thirds (installed strategy)
+
+All of it is in `dryrun/strategies/range_thirds.py` (the numbers in `RULES`, the rule in `RangeThirdsEngine`); nothing is configured on a page. With D = previous High - Low, third = D/3 and the
+"0.8" = 0.8% of the previous High (BUY) or Low (SELL): BUY entry = High - (third - 0.8), stop = entry - 0.8, target = entry + third + (third - 0.8) (= High + third); SELL entry = Low + (third - 0.8),
+stop = entry + 0.8, target = entry - third - (third - 0.8). Fixed prices from yesterday's High/Low; the risk is exactly the 0.8. Approach entry (before the level breaks). Around it: no entry in the first
+5 minutes (candle), none from 18:00 (an armed side is cancelled then), one trade a day in total (counted when the entry fills; the other side is cancelled), a quantity worked out from the Rs 10,000 maximum loss, the day-open filter (no trade at all unless the day opens
+between the previous Low and High), and the runner's session square-off (MCX 23:20, NSE 15:15). Nothing is carried overnight. Same rule as `tradingview/range_thirds_strategy.pine`.
+
+`range_thirds_research.py` (hidden from the dropdowns) is the earlier all-options version: the D/6, D/3, D/3 rule, after-break entry, windows as settings. The study in `../docs/range-thirds-study.md`,
+`python -m dryrun.strategies.range_thirds_backtest` (a sweep and `--verify` tool) and `scripts/verify_backtest.py` use it (strategy name `range_thirds_research`).
+
+## Previous-day 30% opening zones (installed strategy `prev_day_zone30`)
+
+The session's **opening price** picks the side, once a day: open in the upper 30% of yesterday's range (PDH - 0.3 D to PDH) = BUY; open in the lower 30%
+(PDL to PDL + 0.3 D) = SELL; an open outside both zones (or a gap beyond PDH/PDL) = no trade. One trade a day, win or lose.
+* **Entry timing:** "no entry in the first candle" means the entry cannot be at the opening price itself. It is a market order at the first price 5 minutes (`RULES["skip_minutes"]`) after the
+  session open, i.e. at the open of the second candle (= the close of the first). A run started later than `RULES["grace_minutes"]` (30) after that moment skips the day instead of entering late.
+  The opening price is the real session open: a run started mid-session reads it from the day's first stored candle or Dhan's 1-minute candles.
+* **Stop and target:** the stop is the middle price of yesterday's High and Low, (PDH + PDL) / 2 (always on the losing side: a BUY enters above it, a SELL below it), and the target is 1.3 times the
+  stop distance from the actual entry price (`RULES["target_x_stop"]` = 1.3). No new entry from 18:00 (`RULES["last_entry"]`); the runner's normal session square-off applies (MCX 23:20, NSE 15:15),
+  nothing is carried overnight. The quantity comes from the Rs 10,000 maximum loss.
+* Pine version for TradingView: `tradingview/opening_zone30_strategy.pine`.
+
+## 30% opening buy at center (installed strategy `prev_day_zone30_buy_center`)
+
+Reads the day like the 30% opening zones strategy but buys at the centre of yesterday's range instead of at the open, and only buys. The day's real open must be in the top 30% of yesterday's range
+(PDH - 0.3 D to PDH); any other open is no trade. From the end of the first candle a BUY order rests at the centre, (PDH + PDL) / 2, and fills when price comes down to it (at once if price is already
+below it). Stop = PDL; target = entry + 1.4 x the stop distance (risk 1 : reward 1.4; from the centre that is the centre + 0.7 D). If price never comes down, nothing is bought; the order is cancelled
+from 18:00. One trade a day; the quantity comes from the Rs 10,000 maximum loss; the session square-off applies. Everything is in `dryrun/strategies/prev_day_zone30_buy_center.py` (`RULES` and the
+engine). There is no Pine version.
+
+## Market shift strategy (installed strategy `market_shift`)
+
+BUY only, on 5-minute candles; it does not use yesterday's High and Low. The rules and numbers are in `dryrun/strategies/market_shift.py` (`RULES` and the engine); nothing is configured on a page.
+
+* **Day open level:** the open of the first 5-minute candle. **Market shift:** a completed candle closes above it. **Confirmation sequence:** the following candles while each has a higher high and a higher low (no minimum or maximum length).
+  The last candle of the sequence is the **reference candle**: its high is the breakout level, its close the reference entry price.
+* A candle that closes below the day open level cancels the setup (a waiting order too); the next close above starts a new, independent setup.
+* After price breaks above the reference high, a BUY waits at the reference close. If price comes back, the trade is taken; a lower fill (a gap through the price) is taken at that lower price and the difference is added to the target.
+  If the target is reached first there is no trade.
+* **Stop:** walk back from the candle before the shift candle while each earlier low is not higher than the lowest so far; the stop is the lowest low found (also compared with the shift and sequence candles). **Target:** reference entry + (reference entry - stop).
+* Several setups a day, one position at a time (the per-day trade limit is not applied to it). No quantity rule: the run's fixed quantity is used, so a backtest reads in points. Backtest on 1-minute or 5-minute candles.
+* **Market shift SELL** (`market_shift_sell`, `dryrun/strategies/market_shift_sell.py`) is the exact mirror: a candle closing BELOW the day open level, a falling sequence, the lowest candle as reference (its low is the breakout level), a SELL waiting at the reference close,
+  stop = the highest high of the backward walk, a higher fill subtracts the difference from the target. Both sides share one engine (`MarketShiftEngine`, comparisons written with a sign), so they cannot drift apart.
+* The **Strategies** page (menu) describes every installed strategy step by step; each strategy supplies its text as `GUIDE` in its own file.
 
 ## Database (SQLite now, PostgreSQL later)
 
@@ -99,6 +168,21 @@ gross P&L, costs and net P&L. Download all trades from the dashboard (**Download
 without running the strategy and (b) download history from Dhan: daily candles from inception and intraday candles for up to about 5 years
 (Dhan's stated limit; 90 days per request, handled in chunks). Or from a shell: `python -m dryrun.history --symbol BAJFINANCE --days 1825`.
 Disk planning, as an estimate only: a busy instrument produces on the order of 5–30 MB of ticks a day; 1-minute candles are about 375 rows a day per equity.
+
+**Backtest page layout.** Data set, strategy (with a one-paragraph description) and Run are all that is visible. One collapsed *Settings* panel holds the period, slippage and cost and the
+starting capital. There is no quantity box: each strategy works out the quantity of every trade from its maximum loss (`RULES["max_loss_rs"]`, Rs 10,000), see `dryrun/sizing.py`. The page's script is `static/backtest.js`. Sessions with far fewer candles than a full exchange session are always skipped (the result
+lists how many); there is no control for it.
+**Backtest page report.** Like TradingView's Strategy Tester: total P&L in rupees and % of the starting capital (set quantity and capital on the form), max drawdown,
+profitable trades, profit factor, an equity + drawdown chart, and a **day chart** (candles, the strategy's lines, entry/exit markers) for any tested day; click a trade to open its day.
+**Fills:** a candle only gives four prices (open/low/high/close), so the replay plays an extra tick at every strategy line a leg of the path crosses
+(the levels, plus the open position's stop and target): a pending order fills at the level the price crossed, not at the candle's extreme, and a stop exits at the stop
+(plus slippage). A gap between candles stays a gap. This matters most on 5- and 15-minute data.
+
+**Checking the backtest.** `python scripts/verify_backtest.py --db sqlite:///data/dryrun.db --symbol BAJFINANCE --segment NSE_EQ` (or `--instrument-id N [--from DATE]`) re-implements the
+current Range thirds rule with a different mechanism (a dense tick path per candle instead of the engine's inserted level ticks) and compares it trade by trade with the Backtest page's engine,
+and checks the candles (OHLC sanity, gaps, flat candles), every trade's invariants, the daily levels, look-ahead (cutting the data off earlier must not change earlier trades), the summary
+statistics, and how much the result depends on the unknown high/low order inside a candle. Run it against a copy of the database on a quiet machine. Last run (19 Oct 2026): all checks pass on
+Bajaj Finance, Reliance and crude oil mini 1-minute candles. A backtest's complete-session test compares each day with a full exchange session (375 bars NSE, 870 MCX at 1 minute), not with the data's median.
 
 **Same engine for backtests.** `python -m dryrun.replay --symbol BAJFINANCE --interval 1m --from 2026-01-01 --to 2026-10-09` runs the live
 engine over stored candles (open→low→high→close inside each bar for up bars, open→high→low→close for down bars, so use 1-minute data).
@@ -190,3 +274,15 @@ Do not attach a NAT gateway (not free-tier and a common surprise bill).
 ## Not in this phase (by design)
 
 Order placement, broker failover, PostgreSQL (supported by `DATABASE_URL`, untested here), React front end, WhatsApp/e-mail alerts, multi-user accounts. The roadmap order in your plan stands: dry run → monitoring → paper trading → controlled live.
+
+## Market-depth recorder (research, separate from the dry-run service)
+
+`scripts/depth_recorder.py` stores every Dhan Full-packet update for one instrument (last price, volume, total buy/sell
+quantity, OI and the 5 bid + 5 offer levels with quantity and order count) in `data/depth.db`, plus the raw 162-byte packet.
+Table `depth` holds the rows, `events` the connects/errors, and the view `depth_view` adds the per-update volume
+change, 5-level bid/offer quantity, imbalance and spread. Defaults to NATGASMINI Nov futures (`MCX_COMM:574320`, the SecurityId from Dhan's scrip master, not the app's row id in the
+dashboard's instrument search).
+
+    python3 -m venv ~/depth-venv && ~/depth-venv/bin/pip install websockets      # once
+    ~/depth-venv/bin/python scripts/depth_recorder.py                            # 09:00-23:35 IST, needs DHAN_* in .env
+    ~/depth-venv/bin/python scripts/depth_recorder.py --summary                  # what has been recorded

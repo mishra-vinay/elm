@@ -2,20 +2,21 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import csv
 import io
 import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, distinct, func, select
@@ -25,23 +26,24 @@ from . import instruments as instr
 from . import levels as levels_mod
 from .auth import COOKIE, Auth, OtpService
 from .config import IST, SESSIONS, Settings
-from .db import ApiLog, Candle, Instrument, Run, Signal, Tick, Trade, Watch, init_db
+from .db import ApiLog, Candle, Instrument, Run, Signal, Tick, Trade, Watch, delete_ticks, init_db, set_setting
 from .dhan_feed import DhanFeed
+from .depth_service import BUCKETS, DepthService
+from .backtests import BacktestError, BacktestJobs, day_view
 from .dhan_rest import DhanRest
 from .history import backfill
 from .runner import LevelsNeeded, RunManager, StartError
 from .sim_feed import SimFeed
-from .strategy import Params
+from .strategy import STRATEGIES, NoStrategyError, Params, get_strategy
 
+importlib.import_module(f"{__package__}.strategies")      # importing the package registers the installed strategies (none yet)
 log = logging.getLogger("dryrun.app")
 STATIC = Path(__file__).parent / "static"
 
 
 class ParamsIn(BaseModel):
-    pullback_pct: float = 1.0
-    target_pct: float = 2.0
-    stop_pct: float | None = 1.0
-    break_buffer_pct: float = 0.0
+    strategy: str = ""
+    options: dict = {}
     qty: float = 1.0
     slippage_pct: float = 0.02
     cost_pct: float = 0.10
@@ -51,6 +53,12 @@ class ParamsIn(BaseModel):
     daily_loss_limit_pct: float | None = 2.0
 
 
+class PreviewIn(BaseModel):
+    high: float
+    low: float
+    options: dict = {}
+
+
 class StartIn(BaseModel):
     instrument_id: int | None = None
     query: str | None = None
@@ -58,6 +66,20 @@ class StartIn(BaseModel):
     params: ParamsIn = ParamsIn()
     prev_high: float | None = None
     prev_low: float | None = None
+
+
+class RetentionIn(BaseModel):
+    retention_days: int = Field(ge=1, le=365)
+
+
+class BacktestIn(BaseModel):
+    instrument_id: int
+    interval: str
+    date_from: date | None = None
+    date_to: date | None = None
+    min_bars_pct: float = Field(80.0, ge=0, le=100)
+    capital: float = Field(100_000.0, gt=0)          # starting capital the rupee result is shown against
+    params: ParamsIn = ParamsIn()
 
 
 class WatchIn(BaseModel):
@@ -131,6 +153,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     auth = Auth(st.auth_mode, st.dashboard_password, st.secret_key)
     otp = OtpService(st.brevo_api_key, st.brevo_sender, st.allowed_emails) if st.auth_mode == "email_otp" else None
     jobs: dict[int, dict] = {}
+    backtests = BacktestJobs(factory)
     summary_cache: dict = {"at": 0.0, "data": None}
 
     def make_feed(on_tick, on_note, on_status):
@@ -142,12 +165,26 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
 
     manager = RunManager(st, factory, make_feed, rest, **({"clock": clock} if clock else {}))
 
+    def _depth_default():
+        with factory() as s:
+            i = s.scalar(select(Instrument).where(Instrument.symbol == "NATGASMINI", Instrument.instrument == "FUTCOM",
+                                                  Instrument.expiry >= date.today()).order_by(Instrument.expiry).limit(1))
+            return (i.segment, i.security_id, i.name or i.symbol) if i else None
+
+    _url = st.database_url
+    depth_path = str(Path(_url.split("sqlite:///", 1)[1]).parent / "depth.db") if _url.startswith("sqlite:///") else "data/depth.db"
+    depth = DepthService(st, depth_path, _depth_default) if (st.feed_mode == "dhan" and feed_factory is None) else None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await manager.start()
+        if depth:
+            await depth.start()
         if load_master and st.feed_mode == "dhan":
             threading.Thread(target=lambda: _safe_refresh(factory), daemon=True).start()
         yield
+        if depth:
+            await depth.stop()
         await manager.stop()
 
     app = FastAPI(title="Dry-run trading", lifespan=lifespan)
@@ -190,6 +227,22 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     @app.get("/market-data")
     def page_market():
         return FileResponse(STATIC / "market.html")
+
+    @app.get("/depth")
+    def page_depth():
+        return FileResponse(STATIC / "depth.html")
+
+    @app.get("/ticks")
+    def page_ticks():
+        return FileResponse(STATIC / "ticks.html")
+
+    @app.get("/backtest")
+    def page_backtest():
+        return FileResponse(STATIC / "backtest.html")
+
+    @app.get("/strategies")
+    def page_strategies():
+        return FileResponse(STATIC / "strategies.html")
 
     @app.get("/settings")
     def page_settings():
@@ -235,6 +288,36 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         return {"ok": True}
 
     # ------------------------------------------------------------------ protected routes
+    def params_from(body_params: ParamsIn) -> Params:
+        """Validated Params; when exactly one strategy is installed a request that names none uses it."""
+        d = body_params.model_dump()
+        listed = [k for k, v in STRATEGIES.items() if not v.hidden]
+        if not d["strategy"] and len(listed) == 1:
+            d["strategy"] = listed[0]
+        return Params.from_dict(d)
+
+    @app.get("/api/strategies", dependencies=[Depends(need_auth)])
+    def list_strategies():
+        """Installed strategies and their settings forms. Empty until a strategy is added in dryrun/strategies/."""
+        return {"strategies": [x.public() for x in STRATEGIES.values() if not x.hidden],
+                "message": None if STRATEGIES else "No strategy is installed yet. Add one in dryrun/strategies/ (see the README)."}
+
+    @app.post("/api/strategies/{name}/preview", dependencies=[Depends(need_auth)])
+    def strategy_preview(name: str, body: PreviewIn):
+        """The prices a strategy would use for the given previous-day High/Low and settings (for the calculation panel)."""
+        try:
+            spec = get_strategy(name)
+        except NoStrategyError as e:
+            raise HTTPException(404, str(e))
+        if spec.preview is None:
+            return {"summary": None, "cards": [], "notes": []}
+        if not (body.high > body.low > 0):
+            raise HTTPException(400, "High must be greater than Low and both positive")
+        try:
+            return spec.preview(body.high, body.low, body.options) or {"summary": None, "cards": [], "notes": []}
+        except ValueError as e:
+            return {"summary": None, "cards": [], "notes": [], "error": str(e)}
+
     @app.get("/api/state", dependencies=[Depends(need_auth)])
     def state():
         snap = manager.snapshot()
@@ -256,7 +339,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         env_path = os.environ.get("DRYRUN_ENV_FILE", ".env")
         return {"mode": st.feed_mode, "client_id": ("*" * max(0, len(cid) - 4) + cid[-4:]) if cid else "",
                 "token": token_info(st.dhan_access_token), "data_api_checked": manager.rest is not None,
-                "feed_packet": st.feed_packet, "store_ticks": st.store_ticks, "tick_retention_days": st.tick_retention_days,
+                "feed_packet": st.feed_packet, "store_ticks": st.store_ticks, "tick_retention_days": manager.retention_days(),
                 "stale_tick_seconds": st.stale_tick_seconds, "auth_mode": st.auth_mode,
                 "database": st.database_url.split(":", 1)[0].split("+", 1)[0], "env_file_present": os.path.exists(env_path),
                 "sessions": {k: {"open": f"{v[0]:%H:%M}", "last_entry": f"{v[1]:%H:%M}", "square_off": f"{v[2]:%H:%M}", "close": f"{v[3]:%H:%M}"}
@@ -278,9 +361,19 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         manager.activity("app", "info", f"Dhan connection test OK (data plan: {out.get('dataPlan', 'not reported')})")
         return out
 
+    LEGACY = {"pullback": ("pullback_pct", "target_pct", "stop_pct"), "thirds": ("entry_mode", "entry_frac", "stop_frac", "target_frac", "stop_side"), "": ("pullback_pct", "target_pct", "stop_pct")}
+
+    def run_settings(p: dict) -> dict:
+        """Strategy name and options of a stored run. Runs made before strategies became pluggable kept their settings at the top level of the
+        params and used strategies that have since been retired; they are shown as such."""
+        name = p.get("strategy") or ""
+        if p.get("options") or name not in LEGACY:
+            return {"strategy": name or "–", "options": p.get("options") or {}}
+        return {"strategy": (name or "pullback") + " (retired)", "options": {k: p[k] for k in LEGACY[name] if p.get(k) is not None}}
+
     def run_row(r: Run) -> dict:
         sm = r.summary or {}
-        return {"id": r.id, "label": (r.params or {}).get("label", ""), "settings": {k: (r.params or {}).get(k) for k in ("pullback_pct", "target_pct", "stop_pct")}, "date": r.trading_date, "instrument": r.instrument.label if r.instrument else r.instrument_id,
+        return {"id": r.id, "label": (r.params or {}).get("label", ""), "settings": run_settings(r.params or {}), "date": r.trading_date, "instrument": r.instrument.label if r.instrument else r.instrument_id,
                 "status": r.status, "ran_ok": r.ran_ok, "ticks": r.ticks_received, "trades": sm.get("trades"),
                 "win_rate": sm.get("win_rate"), "net_pnl": sm.get("net_pnl"), "net_pct_sum": sm.get("net_pct_sum"),
                 "coverage": sm.get("data_coverage"), "error": r.error, "high": r.prev_high, "low": r.prev_low,
@@ -334,7 +427,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         if inst is None:
             raise HTTPException(404, "instrument not found")
         try:
-            params = Params.from_dict(body.params.model_dump())
+            params = params_from(body.params)
         except ValueError as e:
             raise HTTPException(400, str(e))
         manual = None
@@ -464,7 +557,7 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
     def _summary():
         with factory() as s:
             rows = s.execute(select(Instrument.id, Instrument.symbol, Instrument.segment, Candle.interval, func.count(),
-                                    func.min(Candle.ts), func.max(Candle.ts), func.count(distinct(func.date(Candle.ts))))
+                                    func.min(Candle.ts), func.max(Candle.ts), func.count(distinct(func.date(Candle.ts))), Instrument.name)
                              .join(Candle, Candle.instrument_id == Instrument.id).group_by(Instrument.id, Candle.interval)).all()
             ticks = s.scalar(select(func.count()).select_from(Tick)) or 0
             n_inst = s.scalar(select(func.count()).select_from(Instrument)) or 0
@@ -472,7 +565,178 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
                      for w, i in s.execute(select(Watch, Instrument).join(Instrument, Instrument.id == Watch.instrument_id))]
         return {"instruments": n_inst, "ticks": ticks, "watchlist": watch,
                 "candles": [{"instrument_id": r[0], "symbol": r[1], "segment": r[2], "interval": r[3], "count": r[4], "from": r[5],
-                             "to": r[6], "days": r[7], "per_day": round(r[4] / r[7], 1) if r[7] else None} for r in rows]}
+                             "to": r[6], "days": r[7], "per_day": round(r[4] / r[7], 1) if r[7] else None, "name": r[8]} for r in rows]}
+
+
+    # ------------------------------------------------------------------ live tick monitor and stored-tick management
+    ticks_today_cache: dict = {"at": 0.0, "data": {}}
+
+    @app.get("/api/ticks", dependencies=[Depends(need_auth)])
+    def live_ticks():
+        """Feed health and per-instrument tick quality for the Ticks page (in-memory counters, cheap)."""
+        import time as _t
+        snap = manager.ticks_snapshot()
+        if _t.time() - ticks_today_cache["at"] > 15:
+            today = datetime.combine(manager.clock().date(), datetime.min.time())
+            with factory() as s:
+                rows = s.execute(select(Tick.instrument_id, func.count()).where(Tick.ts >= today).group_by(Tick.instrument_id)).all()
+            ticks_today_cache.update(at=_t.time(), data={r[0]: r[1] for r in rows})
+        with factory() as s:
+            ids = {f"{i.segment}:{i.security_id}": i.id for i in s.scalars(select(Instrument).where(
+                Instrument.id.in_(list({r.inst.id for r in manager.runs.values()} | {x.inst.id for x in manager.states.values()}))))}
+        for r in snap["instruments"]:
+            r["stored_today"] = ticks_today_cache["data"].get(ids.get(r["key"]), 0)
+        return snap
+
+    @app.post("/api/settings/ticks", dependencies=[Depends(need_auth)])
+    def set_tick_retention(body: RetentionIn):
+        set_setting(factory, "tick_retention_days", str(body.retention_days))
+        manager.activity("app", "info", f"Raw tick retention set to {body.retention_days} day(s) from the dashboard")
+        return {"retention_days": manager.retention_days()}
+
+    @app.get("/api/ticks/days", dependencies=[Depends(need_auth)])
+    def tick_days():
+        """Stored raw ticks per day and instrument, so a day can be downloaded and then deleted."""
+        with factory() as s:
+            rows = s.execute(select(func.date(Tick.ts), Instrument.id, Instrument.symbol, Instrument.segment, func.count(),
+                                    func.min(Tick.ts), func.max(Tick.ts))
+                             .join(Instrument, Instrument.id == Tick.instrument_id)
+                             .group_by(func.date(Tick.ts), Instrument.id).order_by(func.date(Tick.ts).desc(), Instrument.symbol)).all()
+        return {"retention_days": manager.retention_days(), "store_ticks": st.store_ticks,
+                "days": [{"date": r[0], "instrument_id": r[1], "symbol": r[2], "segment": r[3], "rows": r[4], "first": r[5], "last": r[6]} for r in rows]}
+
+    @app.get("/api/ticks/export.csv", dependencies=[Depends(need_auth)])
+    def export_ticks(day: date, instrument_id: int | None = None):
+        start = datetime.combine(day, datetime.min.time())
+        q = (select(Tick.ts, Instrument.symbol, Tick.ltp, Tick.ltt, Tick.volume, Tick.day_high, Tick.day_low)
+             .join(Instrument, Instrument.id == Tick.instrument_id)
+             .where(Tick.ts >= start, Tick.ts < start + timedelta(days=1)).order_by(Tick.instrument_id, Tick.id))
+        if instrument_id is not None:
+            q = q.where(Tick.instrument_id == instrument_id)
+
+        def gen():
+            yield "ts,symbol,ltp,exchange_time_raw,cumulative_volume,day_high,day_low\n"
+            with factory() as s:
+                for r in s.execute(q.execution_options(yield_per=5000)):
+                    yield ",".join("" if v is None else str(v) for v in r) + "\n"
+        name = f"ticks_{day.isoformat()}" + (f"_{instrument_id}" if instrument_id is not None else "") + ".csv"
+        return StreamingResponse(gen(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.delete("/api/ticks", dependencies=[Depends(need_auth)])
+    def delete_stored_ticks(day: date | None = None, instrument_id: int | None = None, older_than_days: int | None = None):
+        """Delete one stored day (optionally one instrument) or everything older than N days. Candles, runs and trades are kept."""
+        if day is None and older_than_days is None:
+            raise HTTPException(400, "give a day or older_than_days")
+        before = None
+        if older_than_days is not None:
+            before = manager.clock() - timedelta(days=older_than_days)
+        n = delete_ticks(factory, before=before, day=day, instrument_id=instrument_id)
+        summary_cache["data"] = None
+        manager.activity("data", "info", f"Deleted {n:,} stored ticks" + (f" for {day}" if day else f" older than {older_than_days} day(s)"))
+        return {"deleted": n}
+
+    # ------------------------------------------------------------------ online backtests
+    @app.post("/api/backtest", dependencies=[Depends(need_auth)])
+    def start_backtest(body: BacktestIn):
+        """Run the live engine over a stored dataset in the background; poll /api/backtest/{id}."""
+        try:
+            params = params_from(body.params)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        with factory() as s:
+            inst = s.get(Instrument, body.instrument_id)
+        if inst is None:
+            raise HTTPException(404, "instrument not found")
+        try:
+            jid = backtests.start(body.instrument_id, body.interval, params, body.date_from, body.date_to, body.min_bars_pct,
+                                  f"{inst.symbol} {body.interval} · {params.strategy}", body.capital)
+        except BacktestError as e:
+            raise HTTPException(409, str(e))
+        manager.activity("app", "info", f"Backtest started: {inst.label} {body.interval}, strategy {params.strategy}")
+        return {"id": jid}
+
+    @app.get("/api/backtest/{jid}", dependencies=[Depends(need_auth)])
+    def get_backtest(jid: str):
+        job = backtests.get(jid)
+        if job is None:
+            raise HTTPException(404, "no such backtest (results are kept in memory and lost on restart)")
+        return job
+
+    @app.get("/api/backtest/{jid}/day", dependencies=[Depends(need_auth)])
+    def get_backtest_day(jid: str, day: date = Query(..., alias="date")):
+        """Candles, strategy lines and trades of one tested session of a finished backtest (the day chart)."""
+        job = backtests.get(jid)
+        if job is None:
+            raise HTTPException(404, "no such backtest (results are kept in memory and lost on restart)")
+        if job["result"] is None:
+            raise HTTPException(409, "the backtest has not finished")
+        try:
+            return day_view(factory, job["result"], day)
+        except BacktestError as e:
+            raise HTTPException(404, str(e))
+
+
+    # ------------------------------------------------------------------ market depth recorder
+    def need_depth():
+        if depth is None:
+            raise HTTPException(400, "the depth recorder runs only with the live Dhan feed")
+        return depth
+
+    class DepthTargetIn(BaseModel):
+        segment: str
+        security_id: str
+        label: str = ""
+        on: bool = True
+
+    @app.get("/api/depth/status", dependencies=[Depends(need_auth)])
+    def depth_status():
+        return need_depth().status()
+
+    @app.get("/api/depth/latest", dependencies=[Depends(need_auth)])
+    def depth_latest():
+        from .depth_service import row_json
+        d = need_depth()
+        return {sid: row_json(r) for sid, r in list(d.latest.items())}
+
+    @app.post("/api/depth/targets", dependencies=[Depends(need_auth)])
+    def depth_set_target(body: DepthTargetIn):
+        d = need_depth()
+        d.set_target(body.segment.upper(), body.security_id.strip(), body.label or body.security_id, body.on)
+        manager.activity("data", "info", f"Depth recorder: {body.label or body.security_id} {'on' if body.on else 'paused'}")
+        return {"ok": True, "targets": d.targets()}
+
+    @app.delete("/api/depth/targets", dependencies=[Depends(need_auth)])
+    def depth_del_target(segment: str, security_id: str):
+        d = need_depth()
+        d.remove_target(segment.upper(), security_id)
+        return {"ok": True, "targets": d.targets()}
+
+    @app.get("/api/depth/days", dependencies=[Depends(need_auth)])
+    def depth_days(security_id: str):
+        return need_depth().days(security_id)
+
+    @app.get("/api/depth/series", dependencies=[Depends(need_auth)])
+    def depth_series(security_id: str, day: date, bucket: int = 30, since_ms: int = 0):
+        if bucket not in BUCKETS:
+            raise HTTPException(400, f"bucket must be one of {list(BUCKETS)}")
+        return need_depth().series(security_id, day.isoformat(), bucket, since_ms)
+
+    @app.get("/api/depth/export.csv", dependencies=[Depends(need_auth)])
+    def depth_export(security_id: str, day: date):
+        con, cur, header = need_depth().export_rows(security_id, day.isoformat())
+
+        def gen():
+            try:
+                yield ",".join(header) + "\n"
+                while True:
+                    rows = cur.fetchmany(5000)
+                    if not rows:
+                        break
+                    for r in rows:
+                        yield ",".join("" if v is None else str(v) for v in r) + "\n"
+            finally:
+                con.close()
+        return StreamingResponse(gen(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="depth_{security_id}_{day.isoformat()}.csv"'})
 
     @app.post("/api/feed/token", dependencies=[Depends(need_auth)])
     async def set_token(body: TokenIn):
@@ -496,6 +760,8 @@ def create_app(settings: Settings | None = None, feed_factory=None, load_master:
         manager.activity("app", "info", "Dhan access token updated from the dashboard" + (" and saved to .env" if saved else "") + "; reconnecting the feed")
         manager.feed.update_token(tok)
         await manager.feed.reconnect()
+        if depth:
+            depth.poke()
         return {"ok": True, "saved_to_env": saved, "token": token_info(tok)}
 
     return app

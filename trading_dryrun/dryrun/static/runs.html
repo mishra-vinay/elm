@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dry runs · Dry-run trading</title>
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=7">
 </head>
 <body>
 <div id="hdr"></div>
@@ -19,11 +19,8 @@
       <button class="primary" id="startBtn" onclick="startRun()">Start dry run</button>
     </div>
     <div id="picked" class="small muted" style="margin:6px 0"></div>
-    <div class="grid">
-      <div><label>Pullback % (entry after break)</label><input id="p_pullback" type="number" step="0.05" value="1.0"></div>
-      <div><label>Profit target %</label><input id="p_target" type="number" step="0.1" value="2.0"></div>
-      <div><label>Stop-loss % (empty = none)</label><input id="p_stop" type="number" step="0.1" value="1.0"></div>
-      <div><label>Quantity (units)</label><input id="p_qty" type="number" step="1" value="1"></div>
+    <div id="stratBox"></div>
+    <div class="grid" style="margin-top:10px">
       <div><label>Max trades / day</label><input id="p_maxday" type="number" step="1" value="2"></div>
       <div><label>Daily loss limit % (empty = none)</label><input id="p_loss" type="number" step="0.1" value="2.0"></div>
     </div>
@@ -32,11 +29,10 @@
       <div><label>Previous day Low (filled in automatically; you can edit)</label><input id="m_low" type="number" step="any" placeholder="pick an instrument"></div>
       <div class="small muted" id="levelNote" style="grid-column:span 2;align-self:end">Pick an instrument and its previous-day High/Low appear here.</div>
     </div>
+    <div id="calcBox" class="help" style="margin-top:10px"><b>Calculation</b> <span class="muted">(updates as you change the strategy settings or the High/Low)</span><div id="calc" style="margin-top:6px"></div></div>
     <div class="help"><b>Several runs at once:</b> start as many as you like (up to 20), on different instruments or on the <i>same</i> instrument with different settings and names to compare them side by side.
       They all read the same live prices and are independent.<br>
-      Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API. The rule is the one backtested on silver and Bajaj Finance, which showed
-      <b>no edge</b> there; this is for collecting your own evidence. Defaults are the tested values, not recommendations.
-      Real-order live trading is <b>not enabled</b> in this phase: nothing here ever sends an order.</div>
+      Previous-day High/Low come from the database (daily or stored intraday candles) and then from Dhan's historical API. Real-order live trading is <b>not enabled</b> in this phase: nothing here ever sends an order.</div>
     <div class="small neg" id="startMsg" style="margin-top:6px"></div>
   </section>
 
@@ -45,14 +41,14 @@
     <div id="runs"><span class="muted">No active runs.</span></div></section>
 
   <section><h2>Finished runs</h2>
-    <div class="tbl"><table id="hist"><thead><tr><th>#</th><th>Name</th><th>Date</th><th>Instrument</th><th>Pullback / target / stop %</th><th>Status</th><th>Ran OK</th><th class="num">Ticks</th>
+    <div class="tbl"><table id="hist"><thead><tr><th>#</th><th>Name</th><th>Date</th><th>Instrument</th><th>Settings</th><th>Status</th><th>Ran OK</th><th class="num">Ticks</th>
       <th class="num">Trades</th><th class="num">Win %</th><th class="num">Net P&amp;L</th><th class="num">Coverage</th><th></th></tr></thead><tbody></tbody></table></div>
     <div id="detail" style="margin-top:12px"></div>
   </section>
 
   <section id="activity"></section>
 </main>
-<script src="/static/common.js?v=2"></script>
+<script src="/static/common.js?v=12"></script>
 <script>
 let picked = null, autoLevels = null, lastPreview = null;
 
@@ -65,14 +61,29 @@ async function previewLevels() {
   try {
     const {data} = await api("/api/levels?instrument_id=" + picked.id);
     if (data.found) {
-      $("m_high").value = data.high; $("m_low").value = data.low; autoLevels = {high: data.high, low: data.low};
+      $("m_high").value = data.high; $("m_low").value = data.low; autoLevels = {high: data.high, low: data.low}; calcPreview();
       $("levelNote").textContent = `Filled in for the session on ${data.trading_date}: High ${fmt(data.high)}, Low ${fmt(data.low)} (${data.source}${data.from_date ? ", day " + data.from_date : ""}). Edit to override.`;
-    } else { $("m_high").value = ""; $("m_low").value = ""; $("levelNote").textContent = data.detail; }
+    } else { $("m_high").value = ""; $("m_low").value = ""; $("levelNote").textContent = data.detail; calcPreview(); }
   } catch (e) { $("levelNote").textContent = "Could not look up levels: " + e.message; }
 }
+// The strategy computes its own prices for the previous-day High and Low in the boxes above; the server returns them ready to show.
+let previewTimer;
+function calcPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    const box = $("calc"), H = Number($("m_high").value), L = Number($("m_low").value), sp = STRAT.none ? null : strategyParams();
+    $("startBtn").disabled = STRAT.none;
+    if (!sp) { box.innerHTML = '<span class="muted">No strategy is installed yet, so there is nothing to calculate.</span>'; return; }
+    if (!(H > L && L > 0)) { box.innerHTML = '<span class="muted">Pick an instrument (or type the previous-day High and Low) to see the calculated prices.</span>'; return; }
+    try { const {data} = await api(`/api/strategies/${encodeURIComponent(sp.strategy)}/preview`, {method: "POST", body: JSON.stringify({high: H, low: L, options: sp.options})}); renderPreview(box, data); }
+    catch (e) { box.innerHTML = `<span class="neg">${esc(e.message)}</span>`; }
+  }, 250);
+}
+["input", "change"].forEach(ev => document.addEventListener(ev, e => { if (e.target && e.target.closest && e.target.closest("#m_high, #m_low")) calcPreview(); }));
 function params() {
-  const n = id => $(id).value === "" ? null : Number($(id).value);
-  return {pullback_pct: n("p_pullback") ?? 0, target_pct: n("p_target"), stop_pct: n("p_stop"), qty: n("p_qty") ?? 1, max_trades_per_day: n("p_maxday") ?? 2, daily_loss_limit_pct: n("p_loss")};
+  const n = id => $(id).value === "" ? null : Number($(id).value), sp = strategyParams();
+  if (!sp) throw new Error("No strategy is installed yet.");
+  return {...sp, max_trades_per_day: n("p_maxday") ?? 2, daily_loss_limit_pct: n("p_loss")};
 }
 async function startRun() {
   $("startMsg").textContent = ""; $("startBtn").disabled = true;
@@ -96,7 +107,8 @@ function chart(canvas, r) {
   canvas.width = w * dpr; canvas.height = h * dpr; const g = canvas.getContext("2d"); g.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
   const prices = r.prices.map(p => p[1]);
-  const lines = [[r.high, "prev High", col("--blue")], [r.buy_trigger, "buy trigger", col("--green")], [r.sell_trigger, "sell trigger", col("--red")], [r.low, "prev Low", col("--orange")]];
+  const colors = {blue: "--blue", green: "--green", red: "--red", orange: "--orange", muted: "--muted"};
+  const lines = (r.levels || []).map(l => [l.value, l.name, col(colors[l.color] || "--muted")]);
   const all = prices.concat(lines.map(l => l[0]));
   if (r.position) { all.push(r.position.target); if (r.position.stop) all.push(r.position.stop); }
   let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo) * 0.08 || 1; lo -= pad; hi += pad;
@@ -113,12 +125,12 @@ function chart(canvas, r) {
   else { g.fillStyle = col("--muted"); g.fillText("waiting for ticks…", 10, h / 2); }
 }
 
-const setting = p => `${p.pullback_pct} / ${p.target_pct} / ${p.stop_pct ?? "none"}`;
+const setting = p => optionsText(p);
 let lastRuns = [];
 function renderRuns(runs) {
   lastRuns = runs;
   $("stopAll").style.display = runs.length > 1 ? "" : "none";
-  $("runSummary").innerHTML = runs.length ? `<table><thead><tr><th>#</th><th>Name</th><th>Instrument</th><th>Pullback / target / stop %</th><th>Status</th><th class="num">Last</th><th>Position</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th></th></tr></thead><tbody>${runs.map(r => {
+  $("runSummary").innerHTML = runs.length ? `<table><thead><tr><th>#</th><th>Name</th><th>Instrument</th><th>Settings</th><th>Status</th><th class="num">Last</th><th>Position</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th></th></tr></thead><tbody>${runs.map(r => {
     const pos = r.position;
     return `<tr><td>${r.id}</td><td>${esc(r.label)}</td><td>${esc(r.instrument)}</td><td>${setting(r.params)}</td><td>${r.status}</td><td class="num">${fmt(r.last_price)}</td>
       <td>${pos ? `${pos.side} @ ${fmt(pos.entry)} (<span class="${cls(pos.unrealised_pct)}">${fmt(pos.unrealised_pct)}%</span>)` : "–"}</td><td class="num">${r.summary.trades}</td>
@@ -131,7 +143,7 @@ function renderRuns(runs) {
       <span class="small muted">settings ${setting(r.params)} · levels from ${esc(r.levels_source)} · square-off ${r.squareoff}</span><span style="flex:1"></span><button class="danger" onclick="stopRun(${r.id})">Stop &amp; square off</button></div>
       <div class="now"><b>What is happening now:</b> ${esc(r.status_text)}</div>
       <div class="kv"><span>Last <b>${fmt(r.last_price)}</b></span><span>Ticks <b>${r.ticks}</b></span><span>Last tick <b>${r.last_tick_age == null ? "–" : r.last_tick_age + "s ago"}</b></span>
-        <span>Broke High <b>${r.armed_buy ? "yes, waiting for pullback" : "–"}</b></span><span>Broke Low <b>${r.armed_sell ? "yes, waiting for pullback" : "–"}</b></span></div>
+        ${Object.entries(r.flags || {}).map(([k, v]) => `<span>${esc(k)} <b>${v ? "yes" : "–"}</b></span>`).join("")}</div>
       <div class="kv">${pos ? `<span>Open <b>${pos.side}</b> @ <b>${fmt(pos.entry)}</b></span><span>Target <b>${fmt(pos.target)}</b></span><span>Stop <b>${pos.stop ? fmt(pos.stop) : "none"}</b></span><span class="${cls(pos.unrealised_pct)}">Unrealised <b>${fmt(pos.unrealised_pct)}%</b></span>` : '<span class="muted">No open position</span>'}
         <span>Trades <b>${s.trades}</b></span><span>Wins <b>${s.wins}</b></span><span class="${cls(s.net_pnl)}">Net P&amp;L <b>₹${fmt(s.net_pnl)}</b></span></div>
       <canvas id="c${r.id}"></canvas>
@@ -156,7 +168,7 @@ async function refresh() { try { const {data: s} = await api("/api/state"); rend
 
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => lastRuns.forEach(r => { const cv = $("c" + r.id); if (cv) chart(cv, r); }), 150); });
-boot("runs", () => { refresh(); every(refresh, 2000); });
+boot("runs", async () => { await initStrategyForm(calcPreview); calcPreview(); refresh(); every(refresh, 2000); });
 </script>
 </body>
 </html>

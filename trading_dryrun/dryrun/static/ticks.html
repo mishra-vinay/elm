@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live ticks · Dry-run trading</title>
+<link rel="stylesheet" href="/static/app.css?v=7">
+</head>
+<body>
+<div id="hdr"></div>
+<main id="app">
+  <section>
+    <h2>Feed connection</h2>
+    <dl class="kvlist" id="feedKv"></dl>
+    <div class="help">This page reads counters kept in memory, so it costs the server almost nothing and refreshes every second.
+      <b>Packets</b> are what Dhan sends; the quote feed repeats identical snapshots whenever the order book changes, so most packets are
+      duplicates. <b>Distinct</b> are the ones the strategy and the database actually use.</div>
+  </section>
+
+  <section>
+    <h2>Instruments receiving ticks <span class="muted small" id="tickNote"></span></h2>
+    <style>#tkT th, #tkT td { white-space: nowrap; overflow-wrap: normal; }</style>
+    <div class="tbl"><table id="tkT"><thead><tr>
+      <th>Instrument</th><th>Used by</th><th>Status</th><th class="num">Last price</th><th class="num">Silent for</th>
+      <th class="num" title="packets per second, last 10 s / last 60 s">Packets/s</th><th title="packets per second over the last 60 seconds">Last 60 s</th>
+      <th class="num">Packets</th><th class="num" title="accepted: used by the strategy, candles and the database">Distinct</th>
+      <th class="num" title="skipped packets: identical repeats / older than one already processed / bad prints (a >20% jump the next tick contradicted)">Skipped dup / old / bad</th>
+      <th class="num" title="shortest delay between the exchange's last-trade time and our receipt; a floor for the real latency">Delay floor</th>
+      <th class="num" title="time our code spends per packet: average / 99th percentile / worst">Our code (µs)</th>
+      <th class="num">Stored today</th></tr></thead><tbody></tbody></table></div>
+    <div class="small muted" id="idleNote" style="margin-top:6px"></div>
+  </section>
+
+  <section>
+    <h2>Latest accepted ticks <span class="muted small">click an instrument above to choose</span></h2>
+    <div class="small" id="tailTitle"></div>
+    <div class="tbl" style="max-height:300px;overflow:auto"><table id="tailT"><thead><tr><th>Time (IST)</th><th class="num">Price</th><th class="num">Cumulative volume</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Feed events</h2>
+    <div class="tbl"><table id="evT"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="activity"></section>
+</main>
+<script src="/static/common.js?v=12"></script>
+<script>
+let chosen = null;
+const chip = s => `<span class="badge ${s === "receiving" ? "ok" : s === "silent" ? "bad" : s === "waiting" ? "warn" : ""}">${s}</span>`;
+const spark = a => {
+  const m = Math.max(1, ...a), w = 120, h = 22;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block"><polyline fill="none" stroke="var(--blue)" stroke-width="1.5" points="${a.map((v, i) => `${(i / 59 * (w - 2) + 1).toFixed(1)},${(h - 1 - v / m * (h - 3)).toFixed(1)}`).join(" ")}"/></svg>`;
+};
+const secs = x => x == null ? "–" : x < 90 ? x.toFixed(1) + " s" : x < 5400 ? Math.round(x / 60) + " min" : (x / 3600).toFixed(1) + " h";
+async function refresh() {
+  try {
+    const {data: d} = await api("/api/ticks"); const f = d.feed;
+    $("feedKv").innerHTML = `<dt>Connection</dt><dd>${f.fatal ? `<span class="neg">${esc(f.fatal)}</span>` : f.connected ? '<span class="pos">connected</span>' : '<span class="warnc">disconnected, reconnecting</span>'} · ${d.mode === "sim" ? "<b>simulated feed</b>" : "Dhan live WebSocket"} · ${f.packet} packets · ${f.subscribed} instrument(s) subscribed</dd>
+      <dt>Last message</dt><dd>${f.last_message_age == null ? "none yet" : f.last_message_age + " s ago"} · reconnects since start: ${f.disconnects}</dd>
+      <dt>Keep-alive</dt><dd>${f.ping_interval ? `ping every ${f.ping_interval} s, reconnect if no reply in ${f.ping_timeout} s` : "off"} · round trip to Dhan: ${f.rtt_ms == null ? "not measured" : f.rtt_ms + " ms"}</dd>
+      <dt>Database writer</dt><dd>${d.writer_queue} queued · ${d.writer_errors ? `<span class="neg">${d.writer_errors} errors</span>` : "no errors"} · raw ticks ${d.store_ticks ? `stored, kept ${d.retention_days} day(s) (change on the Settings page)` : "not stored"}</dd>
+      <dt>Dhan history API</dt><dd>${d.rest.configured ? "last call took " + (d.rest.last_latency_ms == null ? "– (none yet)" : d.rest.last_latency_ms + " ms") : "not configured"}</dd>`;
+    const rows = d.instruments;
+    if (!chosen && rows.length) chosen = rows[0].key;
+    $("tkT").querySelector("tbody").innerHTML = rows.map(r => `<tr data-k="${r.key}" style="cursor:pointer${r.key === chosen ? ";background:var(--chip)" : ""}">
+      <td title="${esc(r.instrument)}"><b>${esc(r.symbol)}</b> <span class="muted small">${r.segment}</span></td><td class="nw">${r.kind}${r.runs.length ? " #" + r.runs.join(", #") : ""}</td><td>${chip(r.status)}${r.held ? ' <span class="badge warn" title="a >20% jump is waiting for the next tick to confirm it">jump held</span>' : ""}</td>
+      <td class="num">${fmt(r.last_price)}</td><td class="num">${secs(r.age)}</td><td class="num">${r.rate10} / ${r.rate60}</td><td>${spark(r.persec)}</td>
+      <td class="num">${r.packets.toLocaleString()}</td><td class="num">${r.accepted.toLocaleString()}</td>
+      <td class="num">${r.dup.toLocaleString()} / ${r.old} / <span class="${r.bad ? "neg" : ""}">${r.bad}</span>${r.jump_confirmed ? ` <span class="muted" title="large moves confirmed as real">(+${r.jump_confirmed} real)</span>` : ""}</td>
+      <td class="num">${r.lat_min == null ? "–" : r.lat_min + " s"}</td><td class="num">${r.proc_avg_us == null ? "–" : `${r.proc_avg_us} / ${r.proc_p99_us} / ${r.proc_max_us}`}</td>
+      <td class="num">${(r.stored_today || 0).toLocaleString()}</td></tr>`).join("") ||
+      '<tr><td colspan="13" class="muted">Nothing is subscribed. Start a dry run or use "Collect live ticks" on the Market data page.</td></tr>';
+    $("idleNote").textContent = d.subscribed_idle.length ? "Subscribed but not used by any run or recording (stays subscribed until the server restarts): " + d.subscribed_idle.join(", ") : "";
+    $("tickNote").textContent = `· "silent" = no packet for more than ${d.stale_seconds} s while the market is open (entries are refused then)`;
+    const r = rows.find(x => x.key === chosen);
+    $("tailTitle").textContent = r ? r.instrument : "";
+    $("tailT").querySelector("tbody").innerHTML = r ? r.tail.map(t => `<tr><td class="nw">${t.t}</td><td class="num">${fmt(t.ltp)}</td><td class="num">${t.vol == null ? "–" : t.vol.toLocaleString()}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">No ticks yet.</td></tr>' : "";
+    $("evT").querySelector("tbody").innerHTML = d.notes.map(n => `<tr><td class="nw">${n[0]}</td><td class="${n[1] === "error" ? "neg" : n[1] === "warn" ? "warnc" : ""}">${n[1]}</td><td>${esc(n[2])}</td></tr>`).join("") || '<tr><td colspan="3" class="muted">No feed events since the server started.</td></tr>';
+  } catch (e) {}
+}
+document.addEventListener("click", e => { const tr = e.target.closest && e.target.closest("#tkT tbody tr"); if (tr && tr.dataset.k) { chosen = tr.dataset.k; refresh(); } });
+boot("ticks", () => { refresh(); every(refresh, 1000); });
+</script>
+</body>
+</html>
