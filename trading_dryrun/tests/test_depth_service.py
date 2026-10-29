@@ -35,6 +35,11 @@ def test_targets_series_days_export(tmp_path):
         c, cur, header = svc.export_rows("574320", day)
         assert header[0] == "recv_ts" and len(cur.fetchall()) == 6
         c.close()
+        import threading
+        out = []
+        th = threading.Thread(target=lambda: out.append(svc.status()))       # the web routes run in another thread
+        th.start(); th.join()
+        assert out and out[0]['targets'][0]['security_id'] == '574320'
         svc.remove_target("MCX_COMM", "574320")
         assert svc.targets() == []
         await svc.stop()

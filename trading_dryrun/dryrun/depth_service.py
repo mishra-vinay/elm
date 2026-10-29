@@ -68,7 +68,7 @@ class DepthService:
     # ------------------------------------------------------------------ lifecycle
     async def start(self):
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.con = open_db(self.db_path)
+        self.con = open_db(self.db_path, shared=True)
         self.con.execute("CREATE TABLE IF NOT EXISTS targets (segment TEXT, security_id TEXT, label TEXT, enabled INTEGER DEFAULT 1, "
                          "PRIMARY KEY (segment, security_id))")
         self.con.commit()

@@ -128,8 +128,9 @@ def row_values(r: DepthRow) -> tuple:
 INSERT = "INSERT INTO depth (%s) VALUES (%s)" % (", ".join(COLUMN_NAMES), ", ".join("?" * len(COLUMN_NAMES)))
 
 
-def open_db(path: str) -> sqlite3.Connection:
-    con = sqlite3.connect(path, timeout=30)
+def open_db(path: str, shared: bool = False) -> sqlite3.Connection:
+    """shared=True lets several threads use the connection (the caller must serialise access with a lock)."""
+    con = sqlite3.connect(path, timeout=30, check_same_thread=not shared)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
